@@ -1559,7 +1559,7 @@ function initTry() {
     b.addEventListener('click', () => { Object.assign(T, { period: p.period, gid: p.gid, date: p.date }); render(true); });
     pr.appendChild(b);
   });
-  fetch('series.json').then(r => { if (!r.ok) throw new Error(r.status); return r.json(); }).then(j => {
+  fetch('series.json', { cache: 'no-cache' }).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); }).then(j => {
     SER = j.periods; buildTry(); render(true);
   }).catch(() => { $('try-loading').textContent = 'The forecast file could not be loaded. Reload the page to try again.'; });
 }
@@ -1613,7 +1613,7 @@ function level(s, i) {
   if (i < 0) return { kind: 'na' };
   const p = s.p[i];
   if (p != null) return { kind: p / 10000 >= per().alert ? 'a' : 'q', p: p / 10000 };
-  return { kind: ({ 1: 'in', 2: 'noq', 3: 'gap' })[s.k[i]] || 'na' };
+  return { kind: ({ 1: 'in', 2: 'noq', 3: 'gap' })[(s.k || [])[i]] || 'na' };
 }
 function missingNext(s, i) {
   return [1, 2].filter(d => i + d >= s.q.length || s.q[i + d] == null).map(d => short(addD(T.date, d)));
@@ -1754,7 +1754,7 @@ function renderChart() {
   hit.addEventListener('pointermove', e => {
     const k = idxAt(e); cross.setAttribute('x1', x(k)); cross.setAttribute('x2', x(k)); cross.setAttribute('opacity', 1);
     const d = addD(s.start, k), known = vis(k);
-    showTip(`${nice(d)}\n${known ? `Rain ${s.r[k] ?? '—'} mm · river ${s.q[k] != null ? s.q[k] + '%' : '—'}\nForecast ${s.p[k] != null ? pct(s.p[k] / 10000) : 'none (' + ({ 1: 'already in flood', 2: 'river not read', 3: 'next readings missing' }[s.k[k]] || 'outside the test period') + ')'}${T.reveal && s.y[k] != null ? (s.y[k] === 1 ? ' · flood followed' : ' · no flood') : ''}` : 'Not yet known on the issue day'}\nClick to issue on this day`, e.clientX, e.clientY);
+    showTip(`${nice(d)}\n${known ? `Rain ${s.r[k] ?? '—'} mm · river ${s.q[k] != null ? s.q[k] + '%' : '—'}\nForecast ${s.p[k] != null ? pct(s.p[k] / 10000) : 'none (' + ({ 1: 'already in flood', 2: 'river not read', 3: 'next readings missing' }[(s.k || [])[k]] || 'outside the test period') + ')'}${T.reveal && s.y[k] != null ? (s.y[k] === 1 ? ' · flood followed' : ' · no flood') : ''}` : 'Not yet known on the issue day'}\nClick to issue on this day`, e.clientX, e.clientY);
   });
   hit.addEventListener('pointerleave', () => { cross.setAttribute('opacity', 0); tip.hidden = true; });
   hit.addEventListener('click', e => { T.date = addD(s.start, idxAt(e)); render(); });
