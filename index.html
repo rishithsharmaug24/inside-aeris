@@ -302,7 +302,7 @@ svg .hit { fill: transparent; cursor: pointer; }
     <div class="txt">
       <p class="eyebrow">Step 1 · The question</p>
       <h2>Will this river cross its flood line in the next two days?</h2>
-      <p class="lead">Every evening, for each of 190 river gauges, AERIS gives one number: the chance that a river now below its flood line rises above it tomorrow or the day after.</p>
+      <p class="lead">For a river gauge on a given evening, AERIS gives one number: the chance that the river, now below its flood line, rises above it tomorrow or the day after. It has been run on past days only, for up to 190 gauges.</p>
       <h3>Why this way</h3>
       <ul>
         <li><b>The flood line is the 2-year flood flow:</b> the middle value of the yearly peaks at that gauge, worked out from the training years only. Each river gets its own line, and it is crossed about once every two years, often enough to learn from.</li>
@@ -331,7 +331,7 @@ svg .hit { fill: transparent; cursor: pointer; }
     <div class="txt">
       <p class="eyebrow">Step 2 · Where</p>
       <h2>190 river gauges in 15 basins of Peninsular India</h2>
-      <p class="lead">Each dot is a Central Water Commission gauge with decades of daily flow records. Thirteen basins were used to build the model. Two whole basins, the Krishna and the east-flowing rivers south of the Pennar, were kept out to test it on rivers it had never seen.</p>
+      <p class="lead">Each dot is a Central Water Commission gauge with at least ten years of usable daily flow records in the training period. Thirteen basins were used to build the model. Two whole basins, the Krishna and the east-flowing rivers south of the Pennar, were kept out to test it on rivers it had never seen.</p>
       <h3>Why this way</h3>
       <ul>
         <li><b>Open, long, checked records.</b> CAMELS-IND gives daily flow and catchment data from 1980 to 2020 for these rivers. Flow records for the Ganga and Brahmaputra systems are classified, so northern India cannot be tested with open data.</li>
@@ -391,7 +391,7 @@ svg .hit { fill: transparent; cursor: pointer; }
   <section class="stage" data-act="The data" data-short="Choosing inputs" id="s4" hidden>
     <figure class="fig" style="margin:0">
       <div id="fig-ladder"></div>
-      <figcaption>Brier skill on the validation years 2016–2018 (higher is better; 0 is no better than the usual chance for that day of the year). The first four rows are the same tree model (LightGBM) given more and more inputs. The GRU row has the same inputs as row four. The last row cheats on purpose: it is given the rain that really fell.</figcaption>
+      <figcaption>Brier skill on the validation years 2016–2018 (higher is better; 0 is no better than the usual chance for that day of the year). The first four rows are the same tree model (LightGBM) given more and more inputs. Models with forecast rain train on 2000–2014, the years with archived forecasts; the same tree model without forecast rain, trained on those years, scores 0.079, so forecast rain adds 0.011 here. The GRU row has the same inputs as row four. The last row cheats on purpose: it is given the rain that really fell.</figcaption>
     </figure>
     <div class="txt">
       <p class="eyebrow">Step 4 · Choosing inputs</p>
@@ -495,7 +495,7 @@ svg .hit { fill: transparent; cursor: pointer; }
       <ul>
         <li><b>LSTM is the established network</b> for rain and river flow. A GRU does the same job with two gates instead of three, so its memory layer has a quarter fewer weights and trains faster (59 s against 83 s per run in v1).</li>
         <li><b>In v1 the GRU scored highest</b> of 13 model types, so it was carried into v2.</li>
-        <li><b>Convolution (TCN) and attention (Transformer)</b> did worse here, with far more weights.</li>
+        <li><b>Convolution (TCN) and attention (Transformer)</b> did worse here, with far more weights. They were given a smaller search (4 settings each, against 12) to fit the laptop GPU, so their scores are a lower bound.</li>
       </ul>
       <p class="note">Fair to say: the GRU's lead over the best tree model was not proven in v1 (+0.015, interval −0.005 to +0.040). On the v2 test the tree model L2 scored the same as the GRU (+0.209 against +0.210). The GRU was named the headline model before the test because it had the best validation score.</p>
       <p class="src">Source: reports/model_comparison.md §1.3, §1.5 · docs/F_model_comparison_plan.md §2.3</p>
@@ -533,7 +533,7 @@ svg .hit { fill: transparent; cursor: pointer; }
       <div class="eq" aria-label="GRU equations">
         r<sub>t</sub> = σ(W<sub>r</sub>x<sub>t</sub> + U<sub>r</sub>h<sub>t−1</sub> + b<sub>r</sub>) <span class="c">reset gate</span><br>
         z<sub>t</sub> = σ(W<sub>z</sub>x<sub>t</sub> + U<sub>z</sub>h<sub>t−1</sub> + b<sub>z</sub>) <span class="c">update (keep) gate</span><br>
-        n<sub>t</sub> = tanh(W<sub>n</sub>x<sub>t</sub> + r<sub>t</sub> ⊙ (U<sub>n</sub>h<sub>t−1</sub>) + b<sub>n</sub>) <span class="c">candidate memory</span><br>
+        n<sub>t</sub> = tanh(W<sub>n</sub>x<sub>t</sub> + b<sub>n</sub> + r<sub>t</sub> ⊙ (U<sub>n</sub>h<sub>t−1</sub> + c<sub>n</sub>)) <span class="c">candidate memory</span><br>
         h<sub>t</sub> = (1 − z<sub>t</sub>) ⊙ n<sub>t</sub> + z<sub>t</sub> ⊙ h<sub>t−1</sub> <span class="c">new memory</span>
       </div>
       <div id="fig-toy"></div>
@@ -683,8 +683,8 @@ svg .hit { fill: transparent; cursor: pointer; }
       </div>
       <h3>Why this way</h3>
       <ul>
-        <li><b>The smallest memory won,</b> with the slowest learning rate. With few floods to learn from, a small network generalises better than a big one.</li>
-        <li><b>180 days beat 365.</b> Half a year covers the monsoon build-up. The 365-day, 256-unit trial took 712 s and scored worse.</li>
+        <li><b>The smallest memory won,</b> with the slowest learning rate. A likely reason: with few floods to learn from, a small network generalises better than a big one.</li>
+        <li><b>The two best settings read 180 and 90 days</b> and were nearly tied (2.859 and 2.863 × 10⁻³). The best 365-day setting scored 2.924. The differences between the top settings are small.</li>
         <li><b>The test years played no part.</b> The search used validation years and one seed.</li>
         <li>The same 12 settings were tried for G2-nolate, and the same one won.</li>
       </ul>
@@ -716,7 +716,7 @@ svg .hit { fill: transparent; cursor: pointer; }
       <h3>Why this way</h3>
       <ul>
         <li><b>Averaging seeds</b> smooths out the luck of one run. Their forecasts differed by a spread of 0.0009 in probability on average.</li>
-        <li><b>Calibration was tested, not assumed.</b> Two standard corrections were tried against none; none won, because log loss and the base-rate start had already made the probabilities honest.</li>
+        <li><b>Calibration was tested, not assumed.</b> Two standard corrections were tried against none, and none won: it had the best validation Brier score and also the smallest calibration error (ECE 0.00017, against 0.00023 and 0.00029).</li>
         <li><b>The alert level is 6.3%:</b> the probability above which only 1% of validation days without a flood were alerted. It was fixed before the test and never changed.</li>
       </ul>
       <dl class="facts" style="margin-top:18px">
@@ -757,6 +757,7 @@ svg .hit { fill: transparent; cursor: pointer; }
         <li><b>Intervals come from resampling</b> whole sub-basins and whole years, 500 times, because the days of one flood are not independent.</li>
         <li><b>Sanity checks passed.</b> With shuffled labels the model scores 0.0005 against a limit of 0.005, as it should. 159 automated tests pass.</li>
       </ul>
+      <p class="note">Two departures, both recorded: the freeze took place on 26 October instead of the evening of 24 October (the laptop went into standby and missed the deadline; no code, setting or plan changed in between, and no test value was read), and a one-word naming error in the report script was fixed after the freeze with the owner's approval, before any test value had been read.</p>
       <p class="src">Source: docs/G2_protocol_v2.md · catalog/protocol_v2_freeze.json · catalog/fresh_test_wris_freeze.json · reports/v2_report_draft.md §8</p>
       <details class="say"><summary>What to say</summary><p>"We wrote the rules of the exam before the exam. The test years were locked, and we opened them once. If the model had failed, we would have had to report that."</p></details>
     </div>
@@ -858,8 +859,8 @@ svg .hit { fill: transparent; cursor: pointer; }
       <thead><tr><th>Input</th><th>Available today?</th></tr></thead>
       <tbody>
         <tr><td>Forecast rain (NOAA GEFS)</td><td><span class="chip good">Yes</span> A few hours after each run, free.</td></tr>
-        <tr><td>Rain that fell (IMD grid)</td><td><span class="chip mid">Substitute</span> IMD's 2026 grid is not published yet. NASA's IMERG Early rain arrives about 4 hours after it falls, but the model was not trained on it.</td></tr>
-        <tr><td>River reading (CWC flow)</td><td><span class="chip bad">No</span> The open flow record on India-WRIS ends on 4 June 2026. CWC's flood site publishes water levels, not the flow the model reads.</td></tr>
+        <tr><td>Rain that fell (IMD grid)</td><td><span class="chip mid">Substitute</span> IMD's gridded rain is downloaded as one file per year, and we have no 2026 file. NASA's IMERG Early rain arrives about 4 hours after it falls, but the model was not trained on it.</td></tr>
+        <tr><td>River reading (CWC flow)</td><td><span class="chip bad">No</span> Our download from India-WRIS on 26 October 2026 asked for flow up to that day; the open record it returned ends on 4 June 2026. CWC's flood-forecast site publishes mainly water levels, not the flow the model reads.</td></tr>
         <tr><td>Catchment facts</td><td><span class="chip good">Yes</span> Fixed.</td></tr>
       </tbody>
     </table>
@@ -1094,7 +1095,7 @@ function figLadder(el) {
     { name: 'Calendar only', sub: 'R0, usual chance by date', v: 0.004 },
     { name: 'Weather, soil, catchment', sub: 'L0, no river reading', v: 0.046, color: 'var(--compare)' },
     { name: '+ today\'s river reading', sub: 'L1', v: 0.076, color: 'var(--compare)' },
-    { name: '+ forecast rain', sub: 'L2', v: 0.090, color: 'var(--compare)' },
+    { name: '+ forecast rain', sub: 'L2, from 2000 (0.079 without)', v: 0.090, color: 'var(--compare)' },
     { name: 'Same inputs, GRU network', sub: 'G2, the headline model', v: 0.117, color: 'var(--model)', hl: true },
     { name: 'Rain that really fell', sub: 'oracle, impossible live', v: 0.241, color: 'var(--compare)', ghost: true },
   ], { max: 0.26, ticks: [0, 0.05, 0.1, 0.15, 0.2, 0.25], label: 'Validation skill as inputs are added', rowH: 46 });
@@ -1615,16 +1616,21 @@ function level(s, i) {
   if (p != null) return { kind: p / 10000 >= per().alert ? 'a' : 'q', p: p / 10000 };
   return { kind: ({ 1: 'in', 2: 'noq', 3: 'gap' })[(s.k || [])[i]] || 'na' };
 }
+// s.x lists the days whose reading is in the source record but was removed by our quality checks
+const removed = (s, i) => (s._xs || (s._xs = new Set(s.x || []))).has(i);
+const noReading = (s, i) => removed(s, i) ? 'reading removed by our quality checks' : 'no reading in the source record';
 function missingNext(s, i) {
-  return [1, 2].filter(d => i + d >= s.q.length || s.q[i + d] == null).map(d => short(addD(T.date, d)));
+  return [1, 2].filter(d => i + d >= s.q.length || s.q[i + d] == null).map(d => `${short(addD(T.date, d))} (${noReading(s, i + d)})`);
 }
 function whyNone(lv, s, i) {
   if (lv.kind === 'in') return `Already in flood: the river was at ${s.q[i]}% of its flood flow, so a forecast of it crossing the line does not apply.`;
-  if (lv.kind === 'noq') return 'No forecast: the gauge was not read on this day, so it is unknown whether the river was below its flood line.';
-  if (lv.kind === 'gap') return `No forecast kept: the gauge was not read on ${missingNext(s, i).join(' and ')}, so whether a flood followed cannot be checked. The tests keep only days whose outcome is known.`;
+  if (lv.kind === 'noq') return removed(s, i)
+    ? 'No forecast: this day’s river reading was removed by our quality checks (for example a one-day spike), so it is unknown whether the river was below its flood line.'
+    : 'No forecast: the source record has no river reading for this day, so it is unknown whether the river was below its flood line.';
+  if (lv.kind === 'gap') return `No forecast kept: no usable river reading for ${missingNext(s, i).join(' and ')}, so whether a flood followed cannot be checked. The tests keep only days whose outcome is known.`;
   return 'No forecast for this day: it is outside the period the model was tested on.';
 }
-const shortWhy = { in: 'Already in flood', noq: 'No forecast: river not read', gap: 'No forecast: next readings missing', na: 'No forecast' };
+const shortWhy = { in: 'Already in flood', noq: 'No forecast: no river reading', gap: 'No forecast: next readings missing', na: 'No forecast' };
 
 function render(recenter) {
   $('period-seg').querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.period === T.period)));
@@ -1754,7 +1760,7 @@ function renderChart() {
   hit.addEventListener('pointermove', e => {
     const k = idxAt(e); cross.setAttribute('x1', x(k)); cross.setAttribute('x2', x(k)); cross.setAttribute('opacity', 1);
     const d = addD(s.start, k), known = vis(k);
-    showTip(`${nice(d)}\n${known ? `Rain ${s.r[k] ?? '—'} mm · river ${s.q[k] != null ? s.q[k] + '%' : '—'}\nForecast ${s.p[k] != null ? pct(s.p[k] / 10000) : 'none (' + ({ 1: 'already in flood', 2: 'river not read', 3: 'next readings missing' }[(s.k || [])[k]] || 'outside the test period') + ')'}${T.reveal && s.y[k] != null ? (s.y[k] === 1 ? ' · flood followed' : ' · no flood') : ''}` : 'Not yet known on the issue day'}\nClick to issue on this day`, e.clientX, e.clientY);
+    showTip(`${nice(d)}\n${known ? `Rain ${s.r[k] ?? '—'} mm · river ${s.q[k] != null ? s.q[k] + '%' : '—'}\nForecast ${s.p[k] != null ? pct(s.p[k] / 10000) : 'none (' + ({ 1: 'already in flood', 2: 'no river reading', 3: 'next readings missing' }[(s.k || [])[k]] || 'outside the test period') + ')'}${T.reveal && s.y[k] != null ? (s.y[k] === 1 ? ' · flood followed' : ' · no flood') : ''}` : 'Not yet known on the issue day'}\nClick to issue on this day`, e.clientX, e.clientY);
   });
   hit.addEventListener('pointerleave', () => { cross.setAttribute('opacity', 0); tip.hidden = true; });
   hit.addEventListener('click', e => { T.date = addD(s.start, idxAt(e)); render(); });
