@@ -236,6 +236,7 @@ svg .hit { fill: transparent; cursor: pointer; }
 .mapsvg .gdot.a { fill: var(--flood); stroke: var(--card); stroke-width: 1.5; }
 .mapsvg .gdot.in { fill: none; stroke: var(--accent); stroke-width: 2; }
 .mapsvg .gdot.na { fill: var(--rule); }
+.mapsvg .gdot.gap { fill: none; stroke: var(--ink-3); stroke-width: 1.4; }
 .mapsvg .ring { fill: none; stroke: var(--ink); stroke-width: 2; pointer-events: none; }
 .mapsvg .selring { fill: none; stroke: var(--accent); stroke-width: 3; pointer-events: none; }
 .mapsvg .dev { fill: var(--accent); }
@@ -1582,7 +1583,7 @@ function buildTry() {
   mapSvg.classList.add('mapsvg'); drawStates(mapSvg);
   mapSvg.appendChild(S('g', { id: 'dots' }));
   const lg = document.createElement('div'); lg.className = 'legend';
-  lg.innerHTML = '<span><i style="background:var(--flood)"></i>At or above the alert level</span><span><i style="background:var(--ink-3);opacity:.55"></i>No elevated signal</span><span><i style="border:2px solid var(--accent)"></i>Already above the flood line</span><span id="lg-ring" hidden><i style="border:2px solid var(--ink)"></i>Flood onset followed</span>';
+  lg.innerHTML = '<span><i style="background:var(--flood)"></i>At or above the alert level</span><span><i style="background:var(--ink-3);opacity:.55"></i>No elevated signal</span><span><i style="border:2px solid var(--accent)"></i>Already in flood</span><span><i style="border:1.5px solid var(--ink-3)"></i>No forecast: river readings missing</span><span id="lg-ring" hidden><i style="border:2px solid var(--ink)"></i>Flood onset followed</span>';
   const mc = document.createElement('figcaption'); mc.id = 'map-cap';
   mapP.append(lg, mc);
   cardBox = document.createElement('section'); cardBox.className = 'panel'; cardBox.setAttribute('aria-live', 'polite');
@@ -1606,12 +1607,24 @@ function buildTry() {
 }
 function clampDate() { const [a, b] = periodRange(); if (T.date < a) T.date = a; if (T.date > b) T.date = b; }
 
+// why a day has no forecast (s.k): 1 river already above its flood line, 2 river not read that
+// day, 3 a reading missing in the next two days so the outcome cannot be checked
 function level(s, i) {
   if (i < 0) return { kind: 'na' };
-  const p = s.p[i], q = s.q[i];
-  if (p == null) return { kind: q != null && q >= 100 ? 'in' : 'na' };
-  return { kind: p / 10000 >= per().alert ? 'a' : 'q', p: p / 10000 };
+  const p = s.p[i];
+  if (p != null) return { kind: p / 10000 >= per().alert ? 'a' : 'q', p: p / 10000 };
+  return { kind: ({ 1: 'in', 2: 'noq', 3: 'gap' })[s.k[i]] || 'na' };
 }
+function missingNext(s, i) {
+  return [1, 2].filter(d => i + d >= s.q.length || s.q[i + d] == null).map(d => short(addD(T.date, d)));
+}
+function whyNone(lv, s, i) {
+  if (lv.kind === 'in') return `Already in flood: the river was at ${s.q[i]}% of its flood flow, so a forecast of it crossing the line does not apply.`;
+  if (lv.kind === 'noq') return 'No forecast: the gauge was not read on this day, so it is unknown whether the river was below its flood line.';
+  if (lv.kind === 'gap') return `No forecast kept: the gauge was not read on ${missingNext(s, i).join(' and ')}, so whether a flood followed cannot be checked. The tests keep only days whose outcome is known.`;
+  return 'No forecast for this day: it is outside the period the model was tested on.';
+}
+const shortWhy = { in: 'Already in flood', noq: 'No forecast: river not read', gap: 'No forecast: next readings missing', na: 'No forecast' };
 
 function render(recenter) {
   $('period-seg').querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.period === T.period)));
@@ -1621,21 +1634,22 @@ function render(recenter) {
   $('lg-ring').hidden = !T.reveal;
   // map
   const dots = mapSvg.querySelector('#dots'); dots.innerHTML = '';
-  let nA = 0, nF = 0, nHit = 0;
+  let nA = 0, nF = 0, nHit = 0, nIn = 0;
   const sel = GAUGES.get(T.gid);
   for (const gid in per().series) {
     const g = GAUGES.get(gid); if (!g) continue;
     const s = series(gid), i = at(s, T.date), lv = level(s, i);
-    const r = lv.kind === 'a' ? 7.5 : lv.kind === 'q' ? 4.5 : lv.kind === 'in' ? 5.5 : 3;
+    const r = lv.kind === 'a' ? 7.5 : lv.kind === 'q' ? 4.5 : lv.kind === 'in' ? 5.5 : 3.5;
     if (lv.kind === 'a') nA++;
+    if (lv.kind === 'in') nIn++;
     const y = i >= 0 ? s.y[i] : null;
     if (y === 1) { nF++; if (lv.kind === 'a') nHit++; }
-    const text = `${g.site} · ${g.river}\n${lv.kind === 'a' || lv.kind === 'q' ? 'Forecast ' + pct(lv.p) : lv.kind === 'in' ? 'Already above the flood line' : 'No forecast'}${T.reveal && y != null ? (y === 1 ? '\nFlood onset followed' : '\nNo flood onset') : ''}`;
-    S('circle', { cx: g.x, cy: g.y, r, class: 'gdot ' + lv.kind, 'data-gid': gid, 'data-tip': text }, dots);
+    const text = `${g.site} · ${g.river}\n${lv.kind === 'a' || lv.kind === 'q' ? 'Forecast ' + pct(lv.p) : shortWhy[lv.kind]}${lv.kind === 'in' ? ` (${s.q[i]}% of flood flow)` : ''}${T.reveal && y != null ? (y === 1 ? '\nFlood onset followed' : '\nNo flood onset') : ''}`;
+    S('circle', { cx: g.x, cy: g.y, r, class: 'gdot ' + (lv.kind === 'noq' ? 'gap' : lv.kind), 'data-gid': gid, 'data-tip': text }, dots);
     if (T.reveal && y === 1) S('circle', { cx: g.x, cy: g.y, r: r + 4, class: 'ring' }, dots);
   }
   if (sel) S('circle', { cx: sel.x, cy: sel.y, r: 13, class: 'selring' }, dots);
-  $('map-cap').textContent = `${nice(T.date)}: ${nA} gauge${nA === 1 ? '' : 's'} at or above the alert level (${pct(per().alert)}).` + (T.reveal ? ` ${nF} flood onset${nF === 1 ? '' : 's'} followed; ${nHit} of them had an alert.` : ' Tick "Show what happened" to see the outcome.');
+  $('map-cap').textContent = `${nice(T.date)}: ${nA} gauge${nA === 1 ? '' : 's'} at or above the alert level (${pct(per().alert)}); ${nIn} already in flood.` +(T.reveal ? ` ${nF} flood onset${nF === 1 ? '' : 's'} followed; ${nHit} of them had an alert.` : ' Tick "Show what happened" to see the outcome.');
   renderCard();
   renderChart();
 }
@@ -1652,7 +1666,7 @@ function renderCard() {
   const bb = document.createElement('b');
   const of = document.createElement('span'); of.className = 'of';
   if (lv.kind === 'a' || lv.kind === 'q') { bb.textContent = pct(lv.p); of.textContent = `chance the river crosses its flood line within 2 days (${P.model})`; }
-  else { bb.textContent = '—'; of.textContent = lv.kind === 'in' ? 'The river was already above its flood line, so there is no onset forecast for this day.' : 'No forecast for this day: an input was missing.'; }
+  else { bb.textContent = '—'; of.style.maxWidth = '46ch'; of.textContent = whyNone(lv, s, i); }
   big.append(bb, of);
   if (lv.kind === 'a') add('p', 'level alert', `Alert level reached (${pct(P.alert)} or more)`);
   else if (lv.kind === 'q') add('p', 'level quiet', 'No elevated signal. This is not an all-clear.');
@@ -1667,7 +1681,11 @@ function renderCard() {
   }
   const out = add('div', 'outcome');
   if (!T.reveal) { out.classList.add('hidden'); out.textContent = 'What happened next is hidden. Tick "Show what happened".'; }
-  else if (i < 0 || s.y[i] == null) { out.textContent = lv.kind === 'in' ? 'The river was in flood on the issue day.' : 'No verified outcome for this day.'; }
+  else if (i < 0 || s.y[i] == null) {
+    out.textContent = lv.kind === 'in' ? `The river was already in flood on the issue day, at ${s.q[i]}% of its flood flow.`
+      : lv.kind === 'noq' || lv.kind === 'gap' ? 'Cannot be checked: river readings are missing around this day.'
+      : 'No verified outcome for this day.';
+  }
   else {
     const nx = [s.q[i + 1], s.q[i + 2]].filter(v => v != null);
     const peak = nx.length ? Math.max(...nx) : null;
@@ -1736,7 +1754,7 @@ function renderChart() {
   hit.addEventListener('pointermove', e => {
     const k = idxAt(e); cross.setAttribute('x1', x(k)); cross.setAttribute('x2', x(k)); cross.setAttribute('opacity', 1);
     const d = addD(s.start, k), known = vis(k);
-    showTip(`${nice(d)}\n${known ? `Rain ${s.r[k] ?? '—'} mm · river ${s.q[k] != null ? s.q[k] + '%' : '—'}\nForecast ${s.p[k] != null ? pct(s.p[k] / 10000) : 'none'}${T.reveal && s.y[k] != null ? (s.y[k] === 1 ? ' · flood followed' : ' · no flood') : ''}` : 'Not yet known on the issue day'}\nClick to issue on this day`, e.clientX, e.clientY);
+    showTip(`${nice(d)}\n${known ? `Rain ${s.r[k] ?? '—'} mm · river ${s.q[k] != null ? s.q[k] + '%' : '—'}\nForecast ${s.p[k] != null ? pct(s.p[k] / 10000) : 'none (' + ({ 1: 'already in flood', 2: 'river not read', 3: 'next readings missing' }[s.k[k]] || 'outside the test period') + ')'}${T.reveal && s.y[k] != null ? (s.y[k] === 1 ? ' · flood followed' : ' · no flood') : ''}` : 'Not yet known on the issue day'}\nClick to issue on this day`, e.clientX, e.clientY);
   });
   hit.addEventListener('pointerleave', () => { cross.setAttribute('opacity', 0); tip.hidden = true; });
   hit.addEventListener('click', e => { T.date = addD(s.start, idxAt(e)); render(); });
