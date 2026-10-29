@@ -69,6 +69,8 @@ button, input { font: inherit; color: inherit; }
 .tabs { display: flex; gap: 4px; background: var(--sunk); border-radius: 8px; padding: 3px; }
 .tabs a { text-decoration: none; color: var(--ink-2); padding: 6px 14px; border-radius: 6px; font-weight: 700; font-size: 15px; }
 .tabs a[aria-current="page"] { background: var(--card); color: var(--ink); box-shadow: 0 1px 2px rgb(0 0 0 / .12); }
+.theme-seg { flex-wrap: nowrap; }
+.theme-seg button { padding: 5px 10px; font-size: 13px; }
 .badge { margin: 0 0 0 auto; font: 500 12px/1.3 var(--mono); color: var(--ink-3); text-transform: uppercase; letter-spacing: .08em; }
 
 /* rail */
@@ -266,6 +268,7 @@ svg .hit { fill: transparent; cursor: pointer; }
 </style>
 </head>
 <body>
+<script>try { var t = localStorage.getItem('aeris-theme'); if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t); } catch (e) {}</script>
 
 <header class="top">
   <div class="wrap">
@@ -275,6 +278,11 @@ svg .hit { fill: transparent; cursor: pointer; }
       <a href="#try" id="tab-try">Try the forecast</a>
     </nav>
     <p class="badge">Research forecast · issues no warnings</p>
+    <div class="seg theme-seg" id="theme-seg" role="group" aria-label="Background">
+      <button type="button" data-theme-set="auto" aria-pressed="true" title="Follow this device's setting">Auto</button>
+      <button type="button" data-theme-set="light" aria-pressed="false">Light</button>
+      <button type="button" data-theme-set="dark" aria-pressed="false">Dark</button>
+    </div>
   </div>
 </header>
 
@@ -1774,6 +1782,23 @@ function setupSearch() {
   });
   q.addEventListener('blur', () => setTimeout(close, 120));
 }
+
+/* ------------------------------------------------------------------ background (light / dark) */
+const themeSeg = $('theme-seg');
+function markTheme() {
+  const cur = document.documentElement.getAttribute('data-theme') || 'auto';
+  themeSeg.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.themeSet === cur)));
+}
+themeSeg.addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  const m = b.dataset.themeSet;
+  if (m === 'auto') document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.setAttribute('data-theme', m);
+  try { if (m === 'auto') localStorage.removeItem('aeris-theme'); else localStorage.setItem('aeris-theme', m); } catch (err) {}
+  markTheme();
+});
+new MutationObserver(markTheme).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+markTheme();
 
 /* ------------------------------------------------------------------ init */
 figQuestion($('fig-question'));
