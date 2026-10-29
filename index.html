@@ -1,0 +1,1800 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="How the AERIS flood-onset GRU for Peninsular Indian rivers was built, trained and tested, with a replay of its forecasts on past days. Research only; issues no warnings.">
+<style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0}img{max-width:100%}[hidden]{display:none!important}</style>
+<title>Inside AERIS</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,500..800&family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* Layout: a gauge-station logbook. A flow rail of stages across the top, figure and explanation
+   side by side, Back/Next at the foot; a second view replays real forecast days on a map. */
+:root {
+  --paper: #f1f4f3;
+  --card: #fbfcfc;
+  --sunk: #e3e9e8;
+  --ink: #11202a;
+  --ink-2: #43545d;
+  --ink-3: #6b7b83;
+  --rule: #cdd6d8;
+  --accent: #0b6987;
+  --accent-soft: #d2e6ed;
+  --model: #2a78d6;
+  --compare: #eb6834;
+  --third: #1baf7a;
+  --flood: #c3352b;
+  --flood-soft: #f5dcd8;
+  --warn: #a86f00;
+  --rain: #7d97ab;
+  --display: "Archivo", "Arial Narrow", "Segoe UI", system-ui, sans-serif;
+  --body: "Atkinson Hyperlegible", "Segoe UI", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0c1518; --card: #111e22; --sunk: #172a30; --ink: #e2ebed; --ink-2: #a7b8be;
+    --ink-3: #76888f; --rule: #263a40; --accent: #55b8d8; --accent-soft: #15323b;
+    --model: #3987e5; --compare: #d95926; --third: #199e70; --flood: #ea645b;
+    --flood-soft: #3b1c1a; --warn: #e2a72d; --rain: #5d7a8e; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0c1518; --card: #111e22; --sunk: #172a30; --ink: #e2ebed; --ink-2: #a7b8be;
+  --ink-3: #76888f; --rule: #263a40; --accent: #55b8d8; --accent-soft: #15323b;
+  --model: #3987e5; --compare: #d95926; --third: #199e70; --flood: #ea645b;
+  --flood-soft: #3b1c1a; --warn: #e2a72d; --rain: #5d7a8e; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--paper); color: var(--ink); font: 17px/1.55 var(--body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 0;
+}
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--paper); }
+a { color: var(--accent); }
+button, input { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.wrap { max-width: 1240px; margin: 0 auto; }
+
+/* header */
+.top { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--paper); border-bottom: 1px solid var(--rule); }
+.top .wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 22px; padding-block: 12px; }
+.brand { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; min-width: 0; }
+.brand b { font: 800 26px/1 var(--display); font-stretch: 112%; letter-spacing: .06em; }
+.brand span { color: var(--ink-2); font-size: 15px; }
+.tabs { display: flex; gap: 4px; background: var(--sunk); border-radius: 8px; padding: 3px; }
+.tabs a { text-decoration: none; color: var(--ink-2); padding: 6px 14px; border-radius: 6px; font-weight: 700; font-size: 15px; }
+.tabs a[aria-current="page"] { background: var(--card); color: var(--ink); box-shadow: 0 1px 2px rgb(0 0 0 / .12); }
+.badge { margin: 0 0 0 auto; font: 500 12px/1.3 var(--mono); color: var(--ink-3); text-transform: uppercase; letter-spacing: .08em; }
+
+/* rail */
+.rail-scroll { overflow-x: auto; padding-block: 18px 10px; scrollbar-width: thin; }
+.rail { position: relative; display: flex; gap: 18px; min-width: max-content; padding-inline: 4px; }
+.act { display: flex; flex-direction: column; gap: 8px; }
+.act-label { font: 600 11px/1 var(--mono); text-transform: uppercase; letter-spacing: .1em; color: var(--ink-3); padding-left: 2px; }
+.act ol { list-style: none; margin: 0; padding: 0; display: flex; }
+.act li { position: relative; display: flex; }
+.act li::before { content: ""; position: absolute; top: 15px; left: -37px; width: 74px; height: 2px; background: var(--rule); z-index: 0; }
+.act:first-child li:first-child::before { display: none; }
+.act:not(:first-child) li:first-child::before { left: -55px; width: 92px; }
+.act li.done::before, .act li.here::before { background: var(--accent); }
+.node { display: flex; flex-direction: column; align-items: center; gap: 6px; width: 74px; background: none; border: 0; padding: 0; cursor: pointer; color: var(--ink-3); }
+.node .n { position: relative; z-index: 1; width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; font: 600 13px/1 var(--mono); border: 2px solid var(--rule); background: var(--card); transition: background .3s, border-color .3s, color .3s; }
+.node .l { font-size: 12px; line-height: 1.2; text-align: center; text-wrap: balance; }
+li.done .node .n { border-color: var(--accent); color: var(--accent); }
+li.here .node .n { background: var(--accent); border-color: var(--accent); color: var(--card); }
+li.here .node { color: var(--ink); font-weight: 700; }
+.node:hover .n { border-color: var(--accent); }
+.drop { position: absolute; top: 10px; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); transition: left .7s cubic-bezier(.5,0,.2,1); pointer-events: none; z-index: 2; }
+
+/* stage */
+.stage { display: grid; grid-template-columns: minmax(0, 1.18fr) minmax(0, 1fr); gap: 28px 40px; align-items: start; padding-block: 14px 120px; }
+.stage.enter .fig, .stage.enter .txt { animation: rise .55s cubic-bezier(.2,.7,.2,1) both; }
+.stage.enter .txt { animation-delay: .08s; }
+.stage.enter.back .fig, .stage.enter.back .txt { animation-name: rise-back; }
+@keyframes rise { from { opacity: 0; transform: translateX(28px); } to { opacity: 1; transform: none; } }
+@keyframes rise-back { from { opacity: 0; transform: translateX(-28px); } to { opacity: 1; transform: none; } }
+.fig { min-width: 0; background: var(--card); border: 1px solid var(--rule); border-radius: 10px; padding: 18px; }
+.fig svg { display: block; width: 100%; height: auto; overflow: visible; }
+.fig figcaption, .cap { color: var(--ink-2); font-size: 14px; margin-top: 10px; }
+.txt { min-width: 0; }
+.eyebrow { font: 600 12px/1.2 var(--mono); text-transform: uppercase; letter-spacing: .1em; color: var(--accent); margin: 0 0 10px; }
+h1, h2 { font-family: var(--display); font-stretch: 88%; font-weight: 750; letter-spacing: -.005em; text-wrap: balance; margin: 0; }
+h2 { font-size: clamp(28px, 3.1vw, 40px); line-height: 1.08; }
+h3 { font: 700 13px/1.2 var(--mono); text-transform: uppercase; letter-spacing: .09em; color: var(--ink-3); margin: 22px 0 8px; }
+.lead { font-size: 19px; color: var(--ink); margin: 14px 0 0; max-width: 62ch; }
+.txt ul { margin: 0; padding-left: 20px; display: grid; gap: 7px; max-width: 64ch; }
+.txt li::marker { color: var(--accent); }
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1px; background: var(--rule); border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; margin: 0; }
+.facts div { background: var(--card); padding: 10px 12px; }
+.facts dt { font-size: 12.5px; color: var(--ink-3); }
+.facts dd { margin: 2px 0 0; font: 600 19px/1.2 var(--mono); font-variant-numeric: tabular-nums; }
+.src { font: 12.5px/1.4 var(--mono); color: var(--ink-3); margin-top: 14px; overflow-wrap: anywhere; }
+details.say { margin-top: 16px; border: 1px dashed var(--rule); border-radius: 8px; padding: 8px 12px; background: var(--paper); }
+details.say summary { cursor: pointer; font-weight: 700; color: var(--ink-2); font-size: 14px; }
+details.say p { margin: 8px 0 2px; font-style: italic; color: var(--ink-2); }
+.note { border-left: 3px solid var(--warn); padding: 4px 0 4px 12px; color: var(--ink-2); margin-top: 14px; max-width: 64ch; }
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.eq { font: 15px/1.7 var(--mono); background: var(--paper); border: 1px solid var(--rule); border-radius: 8px; padding: 10px 14px; overflow-x: auto; margin: 0 0 14px; }
+.eq .c { color: var(--ink-3); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13.5px; color: var(--ink-2); margin-top: 10px; }
+.legend i { display: inline-block; width: 12px; height: 12px; border-radius: 50%; vertical-align: -1px; margin-right: 6px; }
+.legend i.sq { border-radius: 2px; }
+.legend i.ln { height: 3px; width: 18px; border-radius: 2px; vertical-align: 3px; }
+.tbl { width: 100%; border-collapse: collapse; font-size: 14.5px; }
+.tbl th { text-align: left; font: 600 12px/1.3 var(--mono); text-transform: uppercase; letter-spacing: .06em; color: var(--ink-3); padding: 6px 8px; border-bottom: 1px solid var(--rule); }
+.tbl td { padding: 7px 8px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+.tbl-wrap { overflow-x: auto; }
+.btnrow { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+.btn { border: 1px solid var(--rule); background: var(--card); border-radius: 7px; padding: 7px 14px; cursor: pointer; font-weight: 700; font-size: 14.5px; }
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--card); }
+input[type="range"] { accent-color: var(--accent); width: 100%; }
+.readout { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin-top: 10px; }
+.readout div { background: var(--paper); border-radius: 7px; padding: 8px 10px; font-size: 13px; color: var(--ink-2); }
+.readout b { display: block; font: 600 18px/1.25 var(--mono); color: var(--ink); }
+.chip { display: inline-flex; align-items: center; gap: 6px; font: 600 12px/1 var(--mono); text-transform: uppercase; letter-spacing: .06em; padding: 5px 9px; border-radius: 999px; border: 1px solid currentColor; white-space: nowrap; }
+.chip.good { color: var(--third); } .chip.mid { color: var(--warn); } .chip.no { color: var(--ink-3); } .chip.bad { color: var(--flood); }
+.verdicts { display: grid; gap: 8px; margin-top: 14px; }
+.verdicts div { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: baseline; font-size: 15px; }
+.loop { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; counter-reset: s; }
+.loop li { counter-increment: s; background: var(--paper); border: 1px solid var(--rule); border-radius: 8px; padding: 9px 10px 9px 38px; position: relative; font-size: 14px; line-height: 1.35; }
+.loop li::before { content: counter(s); position: absolute; left: 10px; top: 9px; width: 20px; height: 20px; border-radius: 50%; background: var(--accent); color: var(--card); font: 600 12px/20px var(--mono); text-align: center; }
+.loop-back { margin-top: 8px; border: 1px dashed var(--accent); border-radius: 8px; padding: 8px 12px; font-size: 14px; color: var(--ink-2); }
+.two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 16px; }
+.rulebox { display: grid; gap: 8px; }
+.rulebox div { display: grid; grid-template-columns: 34px 1fr; gap: 10px; align-items: start; background: var(--paper); border: 1px solid var(--rule); border-radius: 8px; padding: 10px 12px; }
+.rulebox span { font: 700 20px/1 var(--mono); color: var(--accent); }
+.events { list-style: none; margin: 14px 0 0; padding: 0; border-left: 2px solid var(--rule); display: grid; gap: 10px; }
+.events li { position: relative; padding-left: 18px; font-size: 14.5px; }
+.events li::before { content: ""; position: absolute; left: -7px; top: 6px; width: 12px; height: 12px; border-radius: 50%; background: var(--card); border: 2px solid var(--accent); }
+.events time { font: 600 12.5px var(--mono); color: var(--ink-3); display: block; }
+.road { display: grid; gap: 6px; }
+.road div { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 9px 12px; border: 1px solid var(--rule); border-radius: 8px; background: var(--paper); font-size: 14.5px; }
+.road div > span:first-child { font: 600 13px var(--mono); color: var(--ink-3); }
+.archinfo { margin-top: 12px; background: var(--paper); border-radius: 8px; padding: 12px 14px; min-height: 120px; }
+.archinfo h4 { margin: 0 0 4px; font: 700 17px/1.2 var(--display); font-stretch: 92%; }
+.archinfo p { margin: 0; color: var(--ink-2); font-size: 15px; }
+
+/* svg */
+svg text { font-family: var(--body); fill: var(--ink-2); font-size: 12px; }
+svg .mono, svg .tk { font-family: var(--mono); }
+svg .tk { fill: var(--ink-3); font-size: 11px; }
+svg .strong { fill: var(--ink); font-weight: 700; }
+svg .grid { stroke: var(--rule); stroke-width: 1; }
+svg .axis { stroke: var(--ink-3); stroke-width: 1; }
+svg .state { fill: var(--sunk); stroke: var(--rule); stroke-width: 1; }
+svg .floodline { stroke: var(--flood); stroke-width: 2; stroke-dasharray: 6 4; }
+svg .flowline { fill: none; stroke: var(--accent); stroke-width: 2.2; stroke-linejoin: round; }
+svg .rainbar { fill: var(--rain); }
+svg .pbar { fill: var(--model); }
+svg .box { fill: var(--card); stroke: var(--ink-3); stroke-width: 1.2; }
+svg .box.sel { stroke: var(--accent); stroke-width: 2.5; fill: var(--accent-soft); }
+svg .arrow { stroke: var(--ink-3); stroke-width: 1.5; fill: none; }
+svg .hit { fill: transparent; cursor: pointer; }
+.play .draw { stroke-dasharray: 1; stroke-dashoffset: 1; animation: draw 1.8s ease-out .2s forwards; }
+.play .fadein { opacity: 0; animation: fade .5s ease-out 1.6s forwards; }
+@keyframes draw { to { stroke-dashoffset: 0; } }
+@keyframes fade { to { opacity: 1; } }
+
+/* controls */
+.controls { position: fixed; left: 0; right: 0; bottom: 0; z-index: 6; background: color-mix(in srgb, var(--paper) 92%, transparent); backdrop-filter: blur(6px); border-top: 1px solid var(--rule);
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-bottom: env(safe-area-inset-bottom, 0px); }
+.controls .wrap { display: flex; align-items: center; gap: 12px; padding-block: 12px; }
+.controls .count { font: 600 13px var(--mono); color: var(--ink-3); margin-right: auto; }
+.controls .hint { font-size: 13px; color: var(--ink-3); }
+.controls .btn { padding: 10px 18px; font-size: 15.5px; }
+
+/* try view */
+.try-head { padding-block: 22px 6px; display: grid; gap: 6px; }
+.try-head .lead { margin-top: 4px; }
+.try-bar { display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: end; padding-block: 12px; }
+.field { display: grid; gap: 4px; min-width: 0; }
+.field label, .field .lab { font: 600 11.5px var(--mono); text-transform: uppercase; letter-spacing: .08em; color: var(--ink-3); }
+.seg { display: flex; background: var(--sunk); border-radius: 8px; padding: 3px; gap: 3px; flex-wrap: wrap; }
+.seg button { border: 0; background: none; padding: 7px 12px; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 700; color: var(--ink-2); }
+.seg button[aria-pressed="true"] { background: var(--card); color: var(--ink); box-shadow: 0 1px 2px rgb(0 0 0 / .12); }
+.search { position: relative; width: min(360px, 100%); }
+.search input, .datebox input { width: 100%; padding: 8px 11px; border: 1px solid var(--rule); border-radius: 7px; background: var(--card); }
+.sugg { position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 8; background: var(--card); border: 1px solid var(--rule); border-radius: 8px; box-shadow: 0 8px 24px rgb(0 0 0 / .14); margin: 0; padding: 4px; list-style: none; max-height: 320px; overflow-y: auto; }
+.sugg li { padding: 7px 9px; border-radius: 6px; cursor: pointer; font-size: 14px; }
+.sugg li small { display: block; color: var(--ink-3); font-size: 12.5px; }
+.sugg li[aria-selected="true"], .sugg li:hover { background: var(--accent-soft); }
+.datebox { display: flex; gap: 6px; align-items: center; }
+.datebox input { width: 160px; }
+.datebox .btn { padding: 7px 11px; }
+.toggle { display: inline-flex; gap: 8px; align-items: center; font-weight: 700; font-size: 14.5px; cursor: pointer; padding-bottom: 6px; }
+.toggle input { width: 18px; height: 18px; accent-color: var(--accent); }
+.presets { display: flex; flex-wrap: wrap; gap: 8px; padding-block: 2px 14px; }
+.presets button { border: 1px solid var(--rule); background: var(--card); border-radius: 999px; padding: 6px 12px; font-size: 13.5px; cursor: pointer; }
+.presets button:hover { border-color: var(--accent); }
+.presets button small { color: var(--ink-3); margin-left: 4px; }
+.try-grid { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 18px; align-items: start; }
+.panel { background: var(--card); border: 1px solid var(--rule); border-radius: 10px; padding: 16px 18px; min-width: 0; }
+.card-when { font: 600 12px/1.4 var(--mono); text-transform: uppercase; letter-spacing: .07em; color: var(--accent); margin: 0; }
+.card-site { font: 750 30px/1.05 var(--display); font-stretch: 90%; margin: 6px 0 2px; }
+.card-meta { color: var(--ink-2); font-size: 14.5px; margin: 0; }
+.bigp { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin: 16px 0 6px; }
+.bigp b { font: 600 54px/1 var(--mono); font-variant-numeric: tabular-nums; }
+.bigp .of { color: var(--ink-2); font-size: 14.5px; max-width: 24ch; }
+.level { font-weight: 700; font-size: 15px; margin: 4px 0 12px; }
+.level.alert { color: var(--flood); } .level.quiet { color: var(--ink-2); }
+.kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
+.kv div { background: var(--paper); border-radius: 7px; padding: 8px 10px; font-size: 13px; color: var(--ink-2); }
+.kv b { display: block; font: 600 17px/1.25 var(--mono); color: var(--ink); }
+.outcome { margin-top: 12px; border-radius: 8px; padding: 10px 12px; border: 1px solid var(--rule); font-size: 15px; }
+.outcome.yes { border-color: var(--flood); background: var(--flood-soft); }
+.outcome.hidden { border-style: dashed; color: var(--ink-3); }
+.mapsvg .gdot { cursor: pointer; transition: r .2s; }
+.mapsvg .gdot.q { fill: var(--ink-3); opacity: .55; }
+.mapsvg .gdot.a { fill: var(--flood); stroke: var(--card); stroke-width: 1.5; }
+.mapsvg .gdot.in { fill: none; stroke: var(--accent); stroke-width: 2; }
+.mapsvg .gdot.na { fill: var(--rule); }
+.mapsvg .ring { fill: none; stroke: var(--ink); stroke-width: 2; pointer-events: none; }
+.mapsvg .selring { fill: none; stroke: var(--accent); stroke-width: 3; pointer-events: none; }
+.mapsvg .dev { fill: var(--accent); }
+.mapsvg .hold { fill: var(--card); stroke: var(--compare); stroke-width: 2.2; }
+.series-fig { margin-top: 18px; }
+.live { margin-top: 18px; }
+.live h3 { margin-top: 0; }
+.official { color: var(--ink-2); font-size: 14.5px; padding-block: 16px 40px; }
+.loading { color: var(--ink-3); padding: 30px 0; }
+#tip { position: fixed; z-index: 20; pointer-events: none; background: var(--ink); color: var(--paper); font: 13px/1.4 var(--body); padding: 7px 10px; border-radius: 6px; white-space: pre-line; max-width: 280px; box-shadow: 0 4px 14px rgb(0 0 0 / .2); }
+
+@media (max-width: 940px) {
+  .stage { grid-template-columns: minmax(0, 1fr); }
+  .try-grid { grid-template-columns: minmax(0, 1fr); }
+  .loop { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 560px) {
+  body { font-size: 16px; }
+  .badge { display: none; }
+  .two { grid-template-columns: minmax(0, 1fr); }
+  .loop { grid-template-columns: minmax(0, 1fr); }
+  .controls .hint { display: none; }
+  .bigp b { font-size: 44px; }
+  .fig { padding: 12px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+  .play .draw { stroke-dashoffset: 0; } .play .fadein { opacity: 1; }
+}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <div class="brand"><b>AERIS</b><span>River-flood forecasts for Peninsular India</span></div>
+    <nav class="tabs" aria-label="Views">
+      <a href="#how" id="tab-how" aria-current="page">How it works</a>
+      <a href="#try" id="tab-try">Try the forecast</a>
+    </nav>
+    <p class="badge">Research forecast · issues no warnings</p>
+  </div>
+</header>
+
+<main class="wrap">
+<div id="view-how">
+  <div class="rail-scroll" id="rail-scroll"><div class="rail" id="rail"><span class="drop" id="drop"></span></div></div>
+
+  <div id="stages">
+
+  <!-- 1 -->
+  <section class="stage" data-act="The question" data-short="The question" id="s1">
+    <figure class="fig" style="margin:0">
+      <div id="fig-question"></div>
+      <figcaption>Kotni gauge on the Seonath (Mahanadi basin), August–September 2024. On the evening of 10 September the river was at 26% of its flood flow. AERIS gave a 60% chance of crossing the line. The next day it reached 341%, and 369% the day after. The model had never seen any day of 2024.</figcaption>
+    </figure>
+    <div class="txt">
+      <p class="eyebrow">Step 1 · The question</p>
+      <h2>Will this river cross its flood line in the next two days?</h2>
+      <p class="lead">Every evening, for each of 190 river gauges, AERIS gives one number: the chance that a river now below its flood line rises above it tomorrow or the day after.</p>
+      <h3>Why this way</h3>
+      <ul>
+        <li><b>The flood line is the 2-year flood flow:</b> the middle value of the yearly peaks at that gauge, worked out from the training years only. Each river gets its own line, and it is crossed about once every two years, often enough to learn from.</li>
+        <li><b>We forecast the crossing, not "is it in flood".</b> A river already in flood is easy to call. The useful warning comes before the rise.</li>
+        <li><b>Two days</b> is the main target fixed in the protocol. One and three days were built too; 3 to 7 days is on the road map.</li>
+        <li><b>A probability, not yes or no,</b> so whoever acts on it can weigh the chance against the cost of acting.</li>
+      </ul>
+      <h3>From the project</h3>
+      <dl class="facts">
+        <div><dt>Gauges</dt><dd>190</dd></div>
+        <div><dt>Forecast window</dt><dd>day 1–2</dd></div>
+        <div><dt>Flood line</dt><dd>2-yr flow</dd></div>
+      </dl>
+      <p class="src">Source: src/aeris/labels/exceedance.py · reports/v2_report_draft.md §1 · runs/fresh_wris/</p>
+      <details class="say"><summary>What to say</summary><p>"Our system answers one question for each river gauge, every evening: will the river go above its flood line in the next two days? Here is a real example from September 2024, a year the model never saw. The river was low, it rained 127 millimetres, the model said 60 percent, and the next day the river was at more than three times its flood flow."</p></details>
+    </div>
+  </section>
+
+  <!-- 2 -->
+  <section class="stage" data-act="The question" data-short="The gauges" id="s2" hidden>
+    <figure class="fig" style="margin:0">
+      <div id="fig-where"></div>
+      <div class="legend"><span><i style="background:var(--accent)"></i>Development basins (training and testing)</span><span><i class="sq" style="background:var(--card);border:2px solid var(--compare);transform:rotate(45deg) scale(.85)"></i>Held-out basins (testing only)</span></div>
+      <figcaption>The 190 gauges. Hover a dot for its name. Schematic map; state outlines from geoBoundaries (CC BY 4.0), simplified.</figcaption>
+    </figure>
+    <div class="txt">
+      <p class="eyebrow">Step 2 · Where</p>
+      <h2>190 river gauges in 15 basins of Peninsular India</h2>
+      <p class="lead">Each dot is a Central Water Commission gauge with decades of daily flow records. Thirteen basins were used to build the model. Two whole basins, the Krishna and the east-flowing rivers south of the Pennar, were kept out to test it on rivers it had never seen.</p>
+      <h3>Why this way</h3>
+      <ul>
+        <li><b>Open, long, checked records.</b> CAMELS-IND gives daily flow and catchment data from 1980 to 2020 for these rivers. Flow records for the Ganga and Brahmaputra systems are classified, so northern India cannot be tested with open data.</li>
+        <li><b>Held-out basins</b> answer the question an agency will ask first: does it work on a river it has not learned?</li>
+        <li><b>One model for all gauges.</b> It learns what rivers have in common, and uses each catchment's description for what differs.</li>
+      </ul>
+      <h3>From the project</h3>
+      <dl class="facts">
+        <div><dt>Development gauges</dt><dd>161</dd></div>
+        <div><dt>Held-out gauges</dt><dd>29</dd></div>
+        <div><dt>Catchment sizes</dt><dd id="area-range">km²</dd></div>
+      </dl>
+      <p class="src">Source: models/gauges.csv (team repo) · docs/B_data_catalogue.md · reports/A_executive_feasibility.md</p>
+      <details class="say"><summary>What to say</summary><p>"We cover Peninsular India because that is where the river data are open and long enough to test properly. We hid two entire river basins from the model, so we can check it on rivers it has never seen."</p></details>
+    </div>
+  </section>
+
+  <!-- 3 -->
+  <section class="stage" data-act="The data" data-short="Data sources" id="s3" hidden>
+    <figure class="fig" style="margin:0">
+      <div id="fig-info"></div>
+      <figcaption>What a forecast issued on the evening of day <i>t</i> is allowed to see. Everything left of the dashed line is already measured. The forecast rain comes from the run of the day before, the one an agency would actually have at that hour.</figcaption>
+    </figure>
+    <div class="txt">
+      <p class="eyebrow">Step 3 · The data</p>
+      <h2>Five kinds of information, each dated to when it was known</h2>
+      <p class="lead">A forecast issued on day <i>t</i> may use only what existed by then. Every input carries a date stamp, and tests in the code fail if any input comes from later.</p>
+      <div class="tbl-wrap" style="margin-top:16px">
+      <table class="tbl">
+        <thead><tr><th>Input</th><th>Source</th><th>Used as</th></tr></thead>
+        <tbody>
+          <tr><td>Rain that fell</td><td>IMD 0.25° daily grid, 1980–2024</td><td>Daily average over each catchment</td></tr>
+          <tr><td>Weather and soil wetness</td><td>ERA5-Land (reanalysis)</td><td>Temperature, humidity, wind, sunshine, evaporation, soil moisture in 4 layers</td></tr>
+          <tr><td>Forecast rain</td><td>NOAA GEFS, run of day <i>t</i>−1</td><td>Rain for days <i>t</i>+1, +2, +3</td></tr>
+          <tr><td>River reading</td><td>CAMELS-IND to 2020; GUARDIAN 2021–24; India-WRIS (CWC) for the newest test</td><td>Flow as a share of the flood flow</td></tr>
+          <tr><td>Catchment description</td><td>CAMELS-IND attributes</td><td>46 fixed facts: size, slope, soils, geology, land cover, dams, population</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <h3>Why this way</h3>
+      <ul>
+        <li><b>Leakage is the most common way flood models look better than they are.</b> Date stamps make it testable instead of a promise.</li>
+        <li><b>Yesterday's forecast run, not today's.</b> At the moment of issue, today's run is not yet published.</li>
+      </ul>
+      <h3>From the project</h3>
+      <dl class="facts">
+        <div><dt>Training rows (forecast models)</dt><dd>782,958</dd></div>
+        <div><dt>Of which flood onsets</dt><dd>3,785</dd></div>
+        <div><dt>Share</dt><dd>0.48%</dd></div>
+      </dl>
+      <p class="src">Source: reports/v2_report_draft.md §3 · src/aeris/features/forecast_v2.py · runs/track_a/20261019T153217Z_dc94ca7389/run.json</p>
+      <details class="say"><summary>What to say</summary><p>"The model gets five kinds of information. The key rule: it can only use what was really known on the evening of the forecast. For the rain forecast we even use yesterday's run, because today's would not be out yet. Floods are rare: only about one day in two hundred is a flood start."</p></details>
+    </div>
+  </section>
+
+  <!-- 4 -->
+  <section class="stage" data-act="The data" data-short="Choosing inputs" id="s4" hidden>
+    <figure class="fig" style="margin:0">
+      <div id="fig-ladder"></div>
+      <figcaption>Brier skill on the validation years 2016–2018 (higher is better; 0 is no better than the usual chance for that day of the year). The first four rows are the same tree model (LightGBM) given more and more inputs. The GRU row has the same inputs as row four. The last row cheats on purpose: it is given the rain that really fell.</figcaption>
+    </figure>
+    <div class="txt">
+      <p class="eyebrow">Step 4 · Choosing inputs</p>
+      <h2>Inputs were chosen by testing them, not by guessing</h2>
+      <p class="lead">We added one group of inputs at a time and measured the gain on years the model did not train on. Each group had to earn its place.</p>
+      <h3>Why this way</h3>
+      <ul>
+        <li><b>The order is also a check.</b> Rain that really fell beats the river reading, which beats neither. If a model did better without the river reading, something would be wrong.</li>
+        <li><b>Some attributes were banned.</b> A few catchment numbers shipped with the dataset are computed from the whole flow record, test years included, and would leak the answer.</li>
+        <li><b>The live version drops ERA5-Land.</b> It arrives 5 days to 3 months late. A GRU without it (G2-nolate: rain, river reading, forecast rain) was level with G2 on validation (−0.006).</li>
+        <li><b>The gap to 0.241</b> says better rain forecasts are worth more than any change of model.</li>
+      </ul>
+      <h3>The score</h3>
+      <p style="margin:0;max-width:64ch">Brier score = average of (forecast − outcome)², where the outcome is 1 for a flood and 0 for none. Skill = 1 − (model's Brier ÷ Brier of the usual chance for that day of the year).</p>
+      <p class="src">Source: reports/v2_report_draft.md §5 · reports/v2_late_inputs.md · src/aeris/features/track_a.py (FORBIDDEN_ATTRIBUTE_CLASSES)</p>
+      <details class="say"><summary>What to say</summary><p>"We didn't just throw every number in. We added groups one at a time and kept what helped. Adding today's river reading helped, adding the rain forecast helped more, and the neural network got the most out of them. The last bar shows what we could get with a perfect rain forecast, so the rain forecast is the biggest thing to improve."</p></details>
+    </div>
+  </section>
+
+  <!-- 5 -->
+  <section class="stage" data-act="The data" data-short="Scaling inputs" id="s5" hidden>
+    <figure class="fig" style="margin:0">
+      <div class="two" style="margin-top:0">
+        <div><div id="fig-rain-raw"></div></div>
+        <div><div id="fig-rain-log"></div></div>
+      </div>
+      <figcaption id="rain-cap">Daily catchment rain on 1,775,451 training days. Left: millimetres. Right: the same days after log(1 + mm). Heavy days are rare but decide floods; the log scale stops them swamping everything else.</figcaption>
+      <div class="tbl-wrap" style="margin-top:14px">
+      <table class="tbl">
+        <thead><tr><th>Input</th><th>What we do to it</th></tr></thead>
+        <tbody>
+          <tr><td>Rain</td><td>log(1 + mm); a second channel gives mm ÷ the catchment's own 99th-percentile day</td></tr>
+          <tr><td>River flow</td><td>flow ÷ the gauge's 2-year flood flow, then log(1 + x); a missing reading becomes 0 plus a "missing" flag</td></tr>
+          <tr><td>Weather, soil</td><td>subtract the mean, divide by the spread, both from training days only</td></tr>
+          <tr><td>Day of year</td><td>sine and cosine, so 31 December sits next to 1 January</td></tr>
+          <tr><td>Catchment facts</td><td>gaps filled with the median, scaled the same way, clipped to ±6</td></tr>
+        </tbody>
+      </table>
+      </div>
+    </figure>
+    <div class="txt">
+      <p class="eyebrow">Step 5 · Preparing the inputs</p>
+      <h2>Putting every river and every storm on the same scale</h2>
+      <p class="lead">A neural network learns best when its inputs are of similar size. Daily catchment rain runs from 0 to 432 mm, and the flood flow of a gauge ranges from 39 to 31,807 cubic metres a second, so each input is reshaped first.</p>
+      <h3>Why this way</h3>
+      <ul>
+        <li><b>Log scale:</b> on it, 10 mm and 100 mm are one step apart instead of 100 mm dwarfing everything.</li>
+        <li><b>Dividing by the gauge's own flood flow</b> lets one model serve a stream and a large river: 1.0 always means "at the flood line".</li>
+        <li><b>Training days only.</b> Scaling with validation or test days would leak information about them.</li>
+        <li><b>A missing-reading flag</b> lets the network tell "river was low" from "no one read the gauge".</li>
+      </ul>
+      <dl class="facts" style="margin-top:18px">
+        <div><dt>Dry catchment-days</dt><dd id="dry-share">55%</dd></div>
+        <div><dt>99th-percentile day</dt><dd id="p99">48 mm</dd></div>
+        <div><dt>Wettest day</dt><dd id="rmax">432 mm</dd></div>
+      </dl>
+      <p class="src">Source: src/aeris/models/sequence.py (_series, _vector, _windows) · data/processed/track_a_v2/train.parquet</p>
+      <details class="say"><summary>What to say</summary><p>"Before training, every input is put on a similar scale. Rain is put on a log scale, river flow is measured against that river's own flood line, and all scaling uses training years only, so nothing leaks from the test."</p></details>
+    </div>
+  </section>
+
+  <!-- 6 -->
+  <section class="stage" data-act="The data" data-short="Time split" id="s6" hidden>
+    <figure class="fig" style="margin:0">
+      <div id="fig-split"></div>
+      <figcaption>How the years were used. Gaps of a whole year separate the blocks. The two held-out basins appear only in the tests.</figcaption>
+    </figure>
+    <div class="txt">
+      <p class="eyebrow">Step 6 · Splitting time</p>
+      <h2>Trained on the past, tested on the future</h2>
+      <p class="lead">Rivers remember, so neighbouring days are alike. Splitting days at random would put near-copies of test days into training. We split by whole years, left gaps, and sealed the test years until the very end.</p>
+      <h3>Why this way</h3>
+      <ul>
+        <li><b>Validation years chose</b> the settings, the calibration and the alert level. So they cannot also be the evidence.</li>
+        <li><b>The test years were sealed.</b> Every read was logged, and the code refused to read them before the protocol was frozen.</li>
+        <li><b>A fresh test came after:</b> 17 months the model never saw, with river data from a different source (CWC via India-WRIS).</li>
+      </ul>
+      <h3>From the project</h3>
+      <dl class="facts">
+        <div><dt>Validation rows</dt><dd>113,941</dd></div>
+        <div><dt>Test, same basins</dt><dd>89,289</dd></div>
+        <div><dt>Test, unseen basins</dt><dd>26,280</dd></div>
+      </dl>
+      <p class="src">Source: catalog/track_a_v2_dataset_card.json · docs/G2_protocol_v2.md · docs/G2_fresh_test_wris.md</p>
+      <details class="say"><summary>What to say</summary><p>"We trained on 1980 to 2014, tuned on 2016 to 2018, and kept 2021 to 2024 locked away. We scored the locked years exactly once. Then we tested again on August 2024 to December 2025."</p></details>
+    </div>
+  </section>
+
+  <!-- 7 -->
+  <section class="stage" data-act="The network" data-short="Why a GRU" id="s7" hidden>
+    <figure class="fig" style="margin:0">
+      <div id="fig-bakeoff"></div>
+      <div class="legend"><span><i class="sq" style="background:var(--model)"></i>Neural networks</span><span><i class="sq" style="background:var(--compare)"></i>Tree models</span><span><i class="sq" style="background:var(--ink-3)"></i>Simpler models</span></div>
+      <figcaption>AERIS v1: 13 kinds of model on the validation years 2016–2018, all given the same inputs including today's river reading (no rain forecast yet). Brier skill, higher is better.</figcaption>
+    </figure>
+    <div class="txt">
+      <p class="eyebrow">Step 7 · Choosing the network</p>
+      <h2>Why a recurrent neural network, and why a GRU</h2>
+      <p class="lead">Whether today's rain becomes a flood depends on the weeks before: wet soil and full channels send rain straight to the river. A recurrent network reads the days in order and carries a memory forward, much as a catchment stores water.</p>
+      <h3>Why this way</h3>
+      <ul>
+        <li><b>LSTM is the established network</b> for rain and river flow. A GRU does the same job with two gates instead of three, so its memory layer has a quarter fewer weights and trains faster (59 s against 83 s per run in v1).</li>
+        <li><b>In v1 the GRU scored highest</b> of 13 model types, so it was carried into v2.</li>
+        <li><b>Convolution (TCN) and attention (Transformer)</b> did worse here, with far more weights.</li>
+      </ul>
+      <p class="note">Fair to say: the GRU's lead over the best tree model was not proven in v1 (+0.015, interval −0.005 to +0.040). On the v2 test the tree model L2 scored the same as the GRU (+0.209 against +0.210). The GRU was named the headline model before the test because it had the best validation score.</p>
+      <p class="src">Source: reports/model_comparison.md §1.3, §1.5 · docs/F_model_comparison_plan.md §2.3</p>
+      <details class="say"><summary>What to say</summary><p>"Rivers have memory. If it rained all week, the same storm floods more. A recurrent network reads 180 days in order and keeps a memory, a bit like the soil storing water. We compared 13 kinds of model and the GRU came out on top on the tuning years."</p></details>
+    </div>
+  </section>
+
+  <!-- 8 -->
+  <section class="stage" data-act="The network" data-short="Layers" id="s8" hidden>
+    <figure class="fig" style="margin:0">
+      <div id="fig-arch"></div>
+      <div class="archinfo" id="archinfo" aria-live="polite"></div>
+      <figcaption>Click any box. Numbers under the boxes are the weights each layer learns.</figcaption>
+    </figure>
+    <div class="txt">
+      <p class="eyebrow">Step 8 · The architecture</p>
+      <h2>The network, layer by layer: 27,185 learned numbers</h2>
+      <p class="lead">Two kinds of input go in: 180 days of daily readings, and one list of facts about the catchment and the coming rain. Out comes one probability.</p>
+      <h3>Why this way</h3>
+      <ul>
+        <li><b>The catchment facts go in twice:</b> on every day, so the memory knows what kind of river it is reading, and again at the end, so the final judgement can use them directly.</li>
+        <li><b>Only the last memory state is used.</b> By day 180 it holds whatever the network learned to keep.</li>
+        <li><b>Small on purpose:</b> 27 thousand weights against 783 thousand training rows with only 3,785 floods.</li>
+      </ul>
+      <h3>The 15 daily channels (G2)</h3>
+      <p style="margin:0;max-width:64ch;font-size:15.5px">Rain (log), rain ÷ the catchment's 99th-percentile day, maximum and minimum temperature, humidity, wind, shortwave and longwave sunshine, potential evaporation, soil moisture in 4 layers, river flow ÷ flood flow (log), and a missing-reading flag. The live version, G2-nolate, keeps only rain, rain ÷ 99th percentile, river flow and the flag: 4 channels, 25,073 weights.</p>
+      <p class="src">Source: src/aeris/models/sequence.py (_build_net) · run.json model_complexity</p>
+      <details class="say"><summary>What to say</summary><p>"Here is the whole network. 180 days of readings go into the GRU, which keeps a memory of 64 numbers. The catchment description is added on every day and again at the end. Two small layers turn that into one probability. In total it learns about 27 thousand numbers."</p></details>
+    </div>
+  </section>
+
+  <!-- 9 -->
+  <section class="stage" data-act="The network" data-short="Inside a GRU" id="s9" hidden>
+    <figure class="fig" style="margin:0">
+      <div class="eq" aria-label="GRU equations">
+        r<sub>t</sub> = σ(W<sub>r</sub>x<sub>t</sub> + U<sub>r</sub>h<sub>t−1</sub> + b<sub>r</sub>) <span class="c">reset gate</span><br>
+        z<sub>t</sub> = σ(W<sub>z</sub>x<sub>t</sub> + U<sub>z</sub>h<sub>t−1</sub> + b<sub>z</sub>) <span class="c">update (keep) gate</span><br>
+        n<sub>t</sub> = tanh(W<sub>n</sub>x<sub>t</sub> + r<sub>t</sub> ⊙ (U<sub>n</sub>h<sub>t−1</sub>) + b<sub>n</sub>) <span class="c">candidate memory</span><br>
+        h<sub>t</sub> = (1 − z<sub>t</sub>) ⊙ n<sub>t</sub> + z<sub>t</sub> ⊙ h<sub>t−1</sub> <span class="c">new memory</span>
+      </div>
+      <div id="fig-toy"></div>
+      <div class="btnrow"><button class="btn primary" id="toy-play" type="button">Play day by day</button><span class="cap" style="margin:0" id="toy-read"></span></div>
+      <figcaption>A toy memory unit reading Kotni's real rain, Aug–Sep 2024. Its weights were set by hand to show the idea; the real network has 64 units whose weights were learned. The memory rises with rain, drains slowly in dry spells, and the keep gate drops on heavy-rain days so new rain is written in fast.</figcaption>
+    </figure>
+    <div class="txt">
+      <p class="eyebrow">Step 9 · Inside one step</p>
+      <h2>Inside a GRU step: keep, reset, write</h2>
+      <p class="lead">Each day the GRU takes that day's inputs <i>x</i> and yesterday's memory <i>h</i>. Two gates, each a number between 0 and 1, decide how much memory to keep and what new content to write.</p>
+      <h3>Why this way</h3>
+      <ul>
+        <li><b>The last line is the trick.</b> When the keep gate z is near 1, memory passes through almost unchanged, and so does the training signal, across all 180 days.</li>
+        <li><b>A plain recurrent network</b> multiplies its memory by the same weights every day. Over 180 days the signal shrinks to nothing or blows up. Gates fix that.</li>
+        <li><b>An LSTM</b> has a third gate and a separate cell memory. The GRU merges them, and here that cost no skill.</li>
+      </ul>
+      <dl class="facts" style="margin-top:18px">
+        <div><dt>Memory units</dt><dd>64</dd></div>
+        <div><dt>Days read</dt><dd>180</dd></div>
+        <div><dt>GRU weights</dt><dd>18,624</dd></div>
+      </dl>
+      <p class="src">18,624 = 3 blocks × 64 units × (31 inputs + 64 memory + 2 biases). Form as in PyTorch nn.GRU. Source: src/aeris/models/sequence.py</p>
+      <details class="say"><summary>What to say</summary><p>"Each day, the GRU looks at the new readings and its memory, and two gates decide: how much of the old memory to keep, and how much new information to write. That is how it can remember a wet month and still react to today's storm."</p></details>
+    </div>
+  </section>
+
+  <!-- 10 -->
+  <section class="stage" data-act="The network" data-short="Activations" id="s10" hidden>
+    <figure class="fig" style="margin:0">
+      <div id="fig-act"></div>
+      <label for="act-x" class="cap" style="display:block;margin-top:8px">Move the input <i>x</i>: <span class="mono" id="act-xv">0.0</span></label>
+      <input type="range" id="act-x" min="-5" max="5" step="0.1" value="0.8">
+      <div class="readout" id="act-read"></div>
+      <div class="legend"><span><i class="ln" style="background:var(--model)"></i>Sigmoid</span><span><i class="ln" style="background:var(--compare)"></i>tanh</span><span><i class="ln" style="background:var(--third)"></i>ReLU</span></div>
+    </figure>
+    <div class="txt">
+      <p class="eyebrow">Step 10 · Activation functions</p>
+      <h2>Activation functions, and why each one sits where it does</h2>
+      <p class="lead">An activation function bends a layer's output, so the network can learn curved relationships such as "a little rain does nothing, a lot does a great deal". AERIS uses three.</p>
+      <div class="tbl-wrap" style="margin-top:14px">
+      <table class="tbl">
+        <thead><tr><th>Function</th><th>Output</th><th>Where, and why</th></tr></thead>
+        <tbody>
+          <tr><td>Sigmoid<br><span class="mono" style="font-size:12.5px">1 ÷ (1 + e<sup>−x</sup>)</span></td><td>0 to 1</td><td>The GRU gates, because a gate is a fraction: how much to let through. The final output, because a chance must lie between 0 and 1.</td></tr>
+          <tr><td>tanh</td><td>−1 to 1</td><td>The GRU's candidate memory: centred on zero, so memory can move up or down, and bounded, so it cannot run away over 180 days. Also the catchment embedding, to keep it on the same scale as the scaled daily inputs.</td></tr>
+          <tr><td>ReLU<br><span class="mono" style="font-size:12.5px">max(0, x)</span></td><td>0 or more</td><td>The 64-unit layer of the head: simple and fast, and its slope is 1 for any positive input, so the training signal passes through without shrinking.</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <h3>Why this way</h3>
+      <ul>
+        <li><b>Without activations</b>, stacked layers collapse into one straight-line model, no better than logistic regression.</li>
+        <li><b>Slope matters for learning.</b> Sigmoid's slope is at most 0.25, tanh's at most 1. That is one reason tanh, not sigmoid, carries the memory.</li>
+      </ul>
+      <p class="note">Fair to say: the gate and memory functions come with the GRU's design, and ReLU and tanh in the other layers are the standard choices. The activations were not tuned. The search tuned window length, memory size, dropout and learning rate instead (step 13).</p>
+      <p class="src">Source: src/aeris/models/sequence.py (_build_net)</p>
+      <details class="say"><summary>What to say</summary><p>"Activation functions make the network non-linear. We use sigmoid where we need a fraction or a probability, tanh for the memory because it stays balanced and bounded, and ReLU in the final layer because it is simple and trains well."</p></details>
+    </div>
+  </section>
+
+  <!-- 11 -->
+  <section class="stage" data-act="Training" data-short="Loss" id="s11" hidden>
+    <figure class="fig" style="margin:0">
+      <div id="fig-loss"></div>
+      <label for="loss-p" class="cap" style="display:block;margin-top:8px">The network's forecast: <span class="mono" id="loss-pv">20%</span></label>
+      <input type="range" id="loss-p" min="0.01" max="0.99" step="0.01" value="0.2">
+      <div class="readout" id="loss-read"></div>
+      <div class="legend"><span><i class="ln" style="background:var(--flood)"></i>Loss if a flood follows</span><span><i class="ln" style="background:var(--model)"></i>Loss if no flood follows</span></div>
+    </figure>
+    <div class="txt">
+      <p class="eyebrow">Step 11 · The loss function</p>
+      <h2>How the network is marked: log loss</h2>
+      <p class="lead">Training needs one number that says how wrong the forecasts are. AERIS uses log loss, also called binary cross-entropy. A confident forecast that turns out wrong is punished very hard.</p>
+      <div class="eq" style="margin-top:14px">L = −[ y·ln(p) + (1 − y)·ln(1 − p) ] <span class="c">averaged over 1,024 examples</span></div>
+      <h3>Why this way</h3>
+      <ul>
+        <li><b>A proper scoring rule.</b> The forecast that minimises log loss is the true probability, so the network is rewarded for honest chances, not bold ones.</li>
+        <li><b>Floods were not up-weighted.</b> They are 0.48% of training days. Weighting them up would push every forecast too high, and "20%" would stop meaning 20%.</li>
+        <li><b>It starts at the base rate.</b> The output bias is set to ln(0.0048 ÷ 0.9952) ≈ −5.3, so on step 1 the network already says 0.48%, not 50%.</li>
+        <li><b>Settings and stopping are judged by the Brier score</b>, another proper score and the headline measure.</li>
+      </ul>
+      <p class="src">Source: src/aeris/models/sequence.py fit(): BCEWithLogitsLoss, bias set from the base rate</p>
+      <details class="say"><summary>What to say</summary><p>"To learn, the network needs a mark for every forecast. Log loss punishes being confidently wrong. We did not boost the rare flood days, because we want a 20 percent forecast to really mean 20 percent."</p></details>
+    </div>
+  </section>
+
+  <!-- 12 -->
+  <section class="stage" data-act="Training" data-short="Training loop" id="s12" hidden>
+    <figure class="fig" style="margin:0">
+      <ol class="loop">
+        <li>Draw 1,024 random gauge-days from 782,958</li>
+        <li>Cut each one's 180-day window</li>
+        <li>Forward pass: 1,024 probabilities</li>
+        <li>Log loss against what happened</li>
+        <li>Backpropagation through all 180 days</li>
+        <li>Clip the gradient, update with AdamW</li>
+      </ol>
+      <div class="loop-back">↻ Repeat. Every 1,000 steps: Brier score on 108,053 validation rows. Keep the best version; stop after 4 checks without improvement.</div>
+      <div class="two">
+        <div><div id="fig-trainloss"></div></div>
+        <div><div id="fig-valbrier"></div></div>
+      </div>
+      <div class="legend"><span><i class="ln" style="background:var(--model)"></i>Seed 0</span><span><i class="ln" style="background:var(--compare)"></i>Seed 1</span><span><i class="ln" style="background:var(--third)"></i>Seed 2</span><span><i style="background:none;border:2px solid var(--ink)"></i>Version kept</span></div>
+      <figcaption>Real training record of G2. Training loss keeps falling; the validation score bottoms out and then gets worse. That turn is the network starting to memorise, and it is where training stops.</figcaption>
+    </figure>
+    <div class="txt">
+      <p class="eyebrow">Step 12 · Training</p>
+      <h2>The training loop: up to 12,000 steps on a laptop GPU</h2>
+      <p class="lead">Each step shows the network 1,024 random gauge-days, measures its log loss, and nudges all 27,185 weights to lower it. Every 1,000 steps it is checked on the validation years and the best version is kept.</p>
+      <h3>Why this way</h3>
+      <ul>
+        <li><b>AdamW</b> adapts the step size for each weight (learning rate 0.0003), and weight decay (0.00001) pulls weights gently toward zero to limit overfitting.</li>
+        <li><b>Gradient clipping</b> to length 1 stops the occasional huge gradient that recurrent networks produce from wrecking the weights.</li>
+        <li><b>Early stopping</b> is the main guard against memorising. The kept versions came from steps 9,000, 6,000 and 5,000.</li>
+        <li><b>16-bit arithmetic on the GPU</b> saves memory and time on the 8 GB laptop card.</li>
+      </ul>
+      <dl class="facts" style="margin-top:18px">
+        <div><dt>Time per run</dt><dd>81–98 s</dd></div>
+        <div><dt>Batch</dt><dd>1,024</dd></div>
+        <div><dt>Learning rate</dt><dd>0.0003</dd></div>
+      </dl>
+      <p class="src">Source: src/aeris/models/sequence.py fit() · runs/track_a/20261019T153217Z_dc94ca7389 (history of each seed)</p>
+      <details class="say"><summary>What to say</summary><p>"Training is a loop: show a batch, mark it, adjust the weights, repeat. Every thousand steps we check it on years it is not trained on. When that check stops improving, we stop, so the network does not just memorise the training years."</p></details>
+    </div>
+  </section>
+
+  <!-- 13 -->
+  <section class="stage" data-act="Training" data-short="Tuning" id="s13" hidden>
+    <figure class="fig" style="margin:0">
+      <div id="fig-tune"></div>
+      <figcaption>The 12 settings tried for G2, by validation Brier score (lower is better). Each row: days read · memory units · dropout · learning rate. The first row of the search was the starting setting; the other 11 were drawn at random from the grid.</figcaption>
+    </figure>
+    <div class="txt">
+      <p class="eyebrow">Step 13 · Tuning</p>
+      <h2>Twelve settings tried, one kept</h2>
+      <p class="lead">Some choices are not learned in training: how many days to read, how big the memory is, how much dropout, how fast to learn. We fixed a grid of 81 combinations, tried 12, and kept the one with the lowest validation Brier score.</p>
+      <div class="tbl-wrap" style="margin-top:14px">
+      <table class="tbl">
+        <thead><tr><th>Setting</th><th>Choices</th><th>Kept</th></tr></thead>
+        <tbody>
+          <tr><td>Days read (window)</td><td class="mono">90 · 180 · 365</td><td class="mono"><b>180</b></td></tr>
+          <tr><td>Memory units</td><td class="mono">64 · 128 · 256</td><td class="mono"><b>64</b></td></tr>
+          <tr><td>Dropout</td><td class="mono">0 · 0.2 · 0.4</td><td class="mono"><b>0</b></td></tr>
+          <tr><td>Learning rate</td><td class="mono">0.0003 · 0.001 · 0.003</td><td class="mono"><b>0.0003</b></td></tr>
+        </tbody>
+      </table>
+      </div>
+      <h3>Why this way</h3>
+      <ul>
+        <li><b>The smallest memory won,</b> with the slowest learning rate. With few floods to learn from, a small network generalises better than a big one.</li>
+        <li><b>180 days beat 365.</b> Half a year covers the monsoon build-up. The 365-day, 256-unit trial took 712 s and scored worse.</li>
+        <li><b>The test years played no part.</b> The search used validation years and one seed.</li>
+        <li>The same 12 settings were tried for G2-nolate, and the same one won.</li>
+      </ul>
+      <p class="src">Source: configs/track_a_v2/v2_G2_gru_I2_from2000__onset_rp2_h2.yaml · run.json search.trials · src/aeris/run.py sample_candidates</p>
+      <details class="say"><summary>What to say</summary><p>"Some settings we had to choose ourselves, like how many past days the network reads. We tried 12 combinations and let the tuning years decide. The smallest network won, which makes sense when floods are rare."</p></details>
+    </div>
+  </section>
+
+  <!-- 14 -->
+  <section class="stage" data-act="Training" data-short="Seeds &amp; calibration" id="s14" hidden>
+    <figure class="fig" style="margin:0">
+      <div id="fig-reli"></div>
+      <figcaption>Reliability on the validation years. Each dot groups days by forecast (0–10%, 10–20%, …) and shows how often a flood followed. On the diagonal, a forecast of 30% is followed by floods 30% of the time. Hollow dots hold fewer than 10 days.</figcaption>
+      <div class="tbl-wrap" style="margin-top:12px">
+      <table class="tbl">
+        <thead><tr><th>Calibration tried</th><th>Validation Brier (cross-fitted)</th><th></th></tr></thead>
+        <tbody>
+          <tr><td>None</td><td class="mono">0.002878</td><td><span class="chip good">kept</span></td></tr>
+          <tr><td>Platt scaling</td><td class="mono">0.002895</td><td></td></tr>
+          <tr><td>Isotonic regression</td><td class="mono">0.002950</td><td></td></tr>
+        </tbody>
+      </table>
+      </div>
+    </figure>
+    <div class="txt">
+      <p class="eyebrow">Step 14 · Finishing</p>
+      <h2>Three seeds, a calibration check and an alert level</h2>
+      <p class="lead">The chosen setting was trained three times from different random starts, and the three forecasts are averaged. Then two last questions: are the probabilities honest, and where should an alert begin?</p>
+      <h3>Why this way</h3>
+      <ul>
+        <li><b>Averaging seeds</b> smooths out the luck of one run. Their forecasts differed by a spread of 0.0009 in probability on average.</li>
+        <li><b>Calibration was tested, not assumed.</b> Two standard corrections were tried against none; none won, because log loss and the base-rate start had already made the probabilities honest.</li>
+        <li><b>The alert level is 6.3%:</b> the probability above which only 1% of validation days without a flood were alerted. It was fixed before the test and never changed.</li>
+      </ul>
+      <dl class="facts" style="margin-top:18px">
+        <div><dt>Alert level (G2)</dt><dd>6.3%</dd></div>
+        <div><dt>G2-nolate</dt><dd>6.0%</dd></div>
+        <div><dt>Seeds averaged</dt><dd>3</dd></div>
+      </dl>
+      <p class="src">Source: runs/track_a/20261019T153217Z_dc94ca7389/metrics.json (reliability, seed_spread) · run.json (calibration_scores_crossfit, alert_thresholds)</p>
+      <details class="say"><summary>What to say</summary><p>"We trained it three times and averaged, so one lucky run doesn't fool us. We checked the probabilities are honest: when it says 20 to 30 percent, floods followed about a quarter of the time. And we fixed the alert level in advance."</p></details>
+    </div>
+  </section>
+
+  <!-- 15 -->
+  <section class="stage" data-act="The proof" data-short="A fair test" id="s15" hidden>
+    <figure class="fig" style="margin:0">
+      <h3 style="margin-top:0">"Better" had to mean all three</h3>
+      <div class="rulebox">
+        <div><span>1</span><p style="margin:0">Its gain in Brier skill has a 95% interval entirely above zero.</p></div>
+        <div><span>2</span><p style="margin:0">The gain is at least 0.02.</p></div>
+        <div><span>3</span><p style="margin:0">It catches no fewer floods at the same false-alarm rate.</p></div>
+      </div>
+      <h3>The order of events, 2026</h3>
+      <ol class="events">
+        <li><time>20 Oct</time>Protocol v2 accepted: models, gauges, years and the rule above fixed in writing.</li>
+        <li><time>26 Oct, 09:11 IST</time>Frozen: every script, setting and data file recorded by its hash.</li>
+        <li><time>26 Oct, 09:42 IST</time>Sealed test 2021–Jul 2024 scored once.</li>
+        <li><time>26 Oct, 20:07 IST</time>Fresh test frozen: Aug 2024–Dec 2025, river data from CWC.</li>
+        <li><time>26 Oct, 20:08 IST</time>Fresh test scored once.</li>
+      </ol>
+    </figure>
+    <div class="txt">
+      <p class="eyebrow">Step 15 · The rules</p>
+      <h2>A test the model was allowed to fail</h2>
+      <p class="lead">Before anyone looked at the test years, the rules were written down and frozen: which models, which gauges, which years, and what would count as better.</p>
+      <h3>Why this way</h3>
+      <ul>
+        <li><b>It stops the most common error</b> in forecasting studies: trying things on the test until something wins.</li>
+        <li><b>Intervals come from resampling</b> whole sub-basins and whole years, 500 times, because the days of one flood are not independent.</li>
+        <li><b>Sanity checks passed.</b> With shuffled labels the model scores 0.0005 against a limit of 0.005, as it should. 159 automated tests pass.</li>
+      </ul>
+      <p class="src">Source: docs/G2_protocol_v2.md · catalog/protocol_v2_freeze.json · catalog/fresh_test_wris_freeze.json · reports/v2_report_draft.md §8</p>
+      <details class="say"><summary>What to say</summary><p>"We wrote the rules of the exam before the exam. The test years were locked, and we opened them once. If the model had failed, we would have had to report that."</p></details>
+    </div>
+  </section>
+
+  <!-- 16 -->
+  <section class="stage" data-act="The proof" data-short="Results" id="s16" hidden>
+    <figure class="fig" style="margin:0">
+      <div id="fig-results"></div>
+      <figcaption>Brier skill against the usual chance for the day of the year, with 95% intervals. Google's and GloFAS's rows are the days each one covers, so they are close to, not exactly, the same days as the others.</figcaption>
+    </figure>
+    <div class="txt">
+      <p class="eyebrow">Step 16 · Results</p>
+      <h2>What the sealed test showed</h2>
+      <p class="lead">At the 90 gauges of the development basins, 2021 to July 2024, G2 forecast flood onsets two days ahead with clear skill, beat the best simple method, and far outperformed GloFAS as agencies receive it.</p>
+      <div class="verdicts">
+        <div><span class="chip good">Better</span><span>Forecast rain helps the GRU: +0.056 (+0.019 to +0.087)</span></div>
+        <div><span class="chip good">Better</span><span>G2 against the best simple method: +0.055 (+0.017 to +0.081)</span></div>
+        <div><span class="chip good">Better</span><span>G2 against GloFAS: +0.201. It caught 72% of flood days against 29%</span></div>
+        <div><span class="chip no">Not shown</span><span>G2 against Google's flood model: interval −2.3 to +0.29</span></div>
+        <div><span class="chip no">Not shown</span><span>Unseen basins: skill +0.166, interval reaches below zero</span></div>
+      </div>
+      <dl class="facts" style="margin-top:18px">
+        <div><dt>Flood events warned</dt><dd>237 of 281</dd></div>
+        <div><dt>Warning ahead</dt><dd>1.7 days</dd></div>
+        <div><dt>False alerts</dt><dd>~3 / gauge-yr</dd></div>
+      </dl>
+      <p style="margin:12px 0 0;max-width:64ch;font-size:15.5px">About 3 in 4 alerts were false alarms. The fresh test, on 17 newer months with CWC river data, gave the live-capable G2-nolate +0.139 (+0.074 to +0.188) in the same basins.</p>
+      <p class="src">Source: reports/final_test_v2.md · reports/fresh_test_wris.md · reports/v2_report_draft.md §9–10</p>
+      <details class="say"><summary>What to say</summary><p>"On the locked years the GRU had clear skill, beat our best simple method, and caught 72 percent of flood days where the global system GloFAS caught 29. It warned of 84 percent of flood events, almost two days ahead. The honest part: three out of four alerts were false alarms, and on rivers it never saw, the result is not yet proven."</p></details>
+    </div>
+  </section>
+
+  <!-- 17 -->
+  <section class="stage" data-act="The proof" data-short="Limits &amp; next" id="s17" hidden>
+    <figure class="fig" style="margin:0">
+      <h3 style="margin-top:0">From this result to a forecast an agency could use</h3>
+      <div class="road">
+        <div><span>1</span><span>Skill on unseen years against what agencies already have</span><span class="chip mid">Partly met</span></div>
+        <div><span>2</span><span>Every input available in real time</span><span class="chip mid">Closer</span></div>
+        <div><span>3</span><span>A full season issued live and scored afterwards</span><span class="chip no">Not yet</span></div>
+        <div><span>4</span><span>Lead times of 3 to 7 days</span><span class="chip no">Not yet</span></div>
+        <div><span>5</span><span>The northern rivers (Ganga, Brahmaputra)</span><span class="chip no">Not yet</span></div>
+        <div><span>6</span><span>False-alarm rates per district</span><span class="chip no">Not yet</span></div>
+        <div><span>7</span><span>Independent review</span><span class="chip no">Not yet</span></div>
+        <div><span>8</span><span>An agency that owns the forecast, with a person reviewing every warning</span><span class="chip no">Not yet</span></div>
+      </div>
+    </figure>
+    <div class="txt">
+      <p class="eyebrow">Step 17 · Limits and next steps</p>
+      <h2>What it cannot do yet</h2>
+      <p class="lead">AERIS is a research forecast, tested on past years with archived data. It issues no warnings.</p>
+      <h3>Limits we measured</h3>
+      <ul>
+        <li><b>False alarms are frequent:</b> about 3 in 4 alert episodes had no flood, and in wet years the alert level raises more.</li>
+        <li><b>Weaker on rivers it never saw:</b> positive but not proven.</li>
+        <li><b>Short warning:</b> 1–2 days, where evacuations often need 3–7.</li>
+        <li><b>River records disagree:</b> in 2020, GUARDIAN and CWC flows agreed within 10% on only 19% of days.</li>
+        <li><b>No live river feed:</b> the open CWC flow record runs months behind.</li>
+      </ul>
+      <p class="src">Source: reports/v2_report_draft.md §11–12 · docs/J_roadmap.md §5</p>
+      <details class="say"><summary>What to say</summary><p>"We are clear about the limits. It is a research forecast. To be used by an agency it needs a full live season, longer warnings, fewer false alarms and an independent review. Condition one is partly met; the rest is our road map."</p></details>
+      <div class="btnrow" style="margin-top:18px"><a class="btn primary" href="#try" style="text-decoration:none">Try the forecast →</a></div>
+    </div>
+  </section>
+
+  </div>
+</div>
+
+<div id="view-try" hidden>
+  <div class="try-head">
+    <p class="eyebrow" style="margin:0">Replay of real past days</p>
+    <h2>Try the forecast</h2>
+    <p class="lead">Type a river, place or basin, and pick a day. You see what AERIS said that evening, then what the river did. Choose 2016–2018 (the tuning years) or August 2024 to December 2025, months the model never saw.</p>
+  </div>
+  <div class="try-bar">
+    <div class="field"><span class="lab">Period and model</span>
+      <div class="seg" id="period-seg">
+        <button type="button" data-period="val" aria-pressed="true">2016–2018 · G2</button>
+        <button type="button" data-period="fresh" aria-pressed="false">Aug 2024–Dec 2025 · G2-nolate</button>
+      </div>
+    </div>
+    <div class="field search"><label for="q">River, place or basin</label>
+      <input id="q" type="search" autocomplete="off" placeholder="e.g. Godavari, Kotni, Krishna" role="combobox" aria-expanded="false" aria-controls="sugg">
+      <ul class="sugg" id="sugg" role="listbox" hidden></ul>
+    </div>
+    <div class="field"><label for="day">Forecast issued on</label>
+      <div class="datebox"><button class="btn" type="button" id="prev-day" aria-label="Previous day">◀</button><input type="date" id="day"><button class="btn" type="button" id="next-day" aria-label="Next day">▶</button></div>
+    </div>
+    <label class="toggle"><input type="checkbox" id="reveal"> Show what happened</label>
+  </div>
+  <div class="presets" id="presets"></div>
+  <div id="try-body"><p class="loading" id="try-loading">Loading the forecasts…</p></div>
+  <section class="panel live">
+    <h3>Why there is no forecast for today here</h3>
+    <p style="margin:0 0 10px;max-width:72ch">A forecast for tomorrow needs today's inputs. On 29 October 2026 they stand like this:</p>
+    <div class="tbl-wrap">
+    <table class="tbl">
+      <thead><tr><th>Input</th><th>Available today?</th></tr></thead>
+      <tbody>
+        <tr><td>Forecast rain (NOAA GEFS)</td><td><span class="chip good">Yes</span> A few hours after each run, free.</td></tr>
+        <tr><td>Rain that fell (IMD grid)</td><td><span class="chip mid">Substitute</span> IMD's 2026 grid is not published yet. NASA's IMERG Early rain arrives about 4 hours after it falls, but the model was not trained on it.</td></tr>
+        <tr><td>River reading (CWC flow)</td><td><span class="chip bad">No</span> The open flow record on India-WRIS ends on 4 June 2026. CWC's flood site publishes water levels, not the flow the model reads.</td></tr>
+        <tr><td>Catchment facts</td><td><span class="chip good">Yes</span> Fixed.</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p style="margin:10px 0 0;max-width:72ch">A forecast for tomorrow could be run only with the river reading missing and a different rain source. That version has never been tested, so this page does not show it as a forecast.</p>
+  </section>
+  <p class="official">For real flood warnings in India: <a href="https://mausam.imd.gov.in" target="_blank" rel="noopener">India Meteorological Department</a> · <a href="https://ffs.india-water.gov.in" target="_blank" rel="noopener">Central Water Commission flood forecasts</a> · <a href="https://ndma.gov.in" target="_blank" rel="noopener">National Disaster Management Authority</a>.<br>
+  <span style="font-size:13px;color:var(--ink-3)">Data: river flow from CAMELS-IND and the Central Water Commission via India-WRIS; rain from IMD's 0.25° gridded data (Pai et al. 2014, MAUSAM 65); forecast rain from NOAA GEFS; weather and soil from ERA5-Land (Copernicus); state outlines from geoBoundaries (CC BY 4.0). India-WRIS, CWC, MoWR and IMD take no responsibility for the inferences shown here.</span></p>
+</div>
+</main>
+
+<nav class="controls" id="controls" aria-label="Step navigation">
+  <div class="wrap">
+    <span class="count" id="count">1 / 17</span>
+    <span class="hint">← → keys work too</span>
+    <button class="btn" type="button" id="back">← Back</button>
+    <button class="btn primary" type="button" id="next">Next →</button>
+  </div>
+</nav>
+<div id="tip" role="tooltip" hidden></div>
+
+<script id="base-data" type="application/json">{"gauges":[{"id":3002,"site":"Ambabal","river":"Godavari/Indravati/Narangi","basin":"Godavari","role":"dev","lat":19.297,"lon":81.789,"area":1968,"x":530.2,"y":228.1,"core":true},{"id":3005,"site":"Ashti","river":"Godavari/Pranhita/Wainganga","basin":"Godavari","role":"dev","lat":19.687,"lon":79.786,"area":50990,"x":453.2,"y":212.5,"core":true},{"id":3008,"site":"Bamni","river":"Godavari/Pranhita/Wardha","basin":"Godavari","role":"dev","lat":19.814,"lon":79.379,"area":46020,"x":437.5,"y":207.4,"core":true},{"id":3013,"site":"Bhatpalli","river":"Godavari/Pranhita/Peddavagu","basin":"Godavari","role":"dev","lat":19.33,"lon":79.504,"area":3100,"x":442.3,"y":226.8,"core":true},{"id":3014,"site":"Bhisnur","river":"Godavari/Pranhita/Wardha","basin":"Godavari","role":"dev","lat":21.107,"lon":78.133,"area":5000,"x":389.6,"y":155.7,"core":true},{"id":3018,"site":"Chindnar","river":"Godavari/Indravati","basin":"Godavari","role":"dev","lat":19.079,"lon":81.301,"area":17270,"x":511.4,"y":236.8,"core":true},{"id":3019,"site":"Degloor","river":"Godavari/Manjira/Lendi","basin":"Godavari","role":"dev","lat":18.562,"lon":77.583,"area":1900,"x":368.5,"y":257.5,"core":true},{"id":3020,"site":"Dhalegaon","river":"Godavari","basin":"Godavari","role":"dev","lat":19.22,"lon":76.363,"area":30840,"x":321.6,"y":231.2,"core":true},{"id":3024,"site":"Gandlapet","river":"Godavari/Peddavagu","basin":"Godavari","role":"dev","lat":18.829,"lon":78.437,"area":1360,"x":401.3,"y":246.8,"core":true},{"id":3028,"site":"Ghugus","river":"Godavari/Pranhita/Wardha","basin":"Godavari","role":"dev","lat":19.947,"lon":79.089,"area":21429,"x":426.4,"y":202.1,"core":true},{"id":3029,"site":"G.R.Bridge","river":"Godavari","basin":"Godavari","role":"dev","lat":19.022,"lon":76.729,"area":33934,"x":335.6,"y":239.1,"core":true},{"id":3030,"site":"Hivra","river":"Godavari/Pranhita/Wardha","basin":"Godavari","role":"dev","lat":20.547,"lon":78.325,"area":10240,"x":397.0,"y":178.1,"core":true},{"id":3031,"site":"Jagdalpur","river":"Godavari/Indravati","basin":"Godavari","role":"dev","lat":19.108,"lon":82.023,"area":7380,"x":539.2,"y":235.7,"core":true},{"id":3038,"site":"Kanhargaon","river":"Godavari/Pranhita/Wardha/Penganga","basin":"Godavari","role":"dev","lat":19.961,"lon":77.148,"area":3515,"x":351.7,"y":201.6,"core":true},{"id":3040,"site":"Keolari","river":"Godavari/Pranhita/Wainganga","basin":"Godavari","role":"dev","lat":22.382,"lon":79.9,"area":2970,"x":457.6,"y":104.7,"core":true},{"id":3043,"site":"Koida","river":"Godavari","basin":"Godavari","role":"dev","lat":17.488,"lon":81.388,"area":305460,"x":514.8,"y":300.5,"core":true},{"id":3045,"site":"Konta","river":"Godavari/Sabari","basin":"Godavari","role":"dev","lat":17.799,"lon":81.393,"area":19550,"x":515.0,"y":288.0,"core":true},{"id":3048,"site":"Kumhari","river":"Godavari/Pranhita/Wainganga","basin":"Godavari","role":"dev","lat":21.884,"lon":80.175,"area":8070,"x":468.1,"y":124.6,"core":true},{"id":3055,"site":"Mancherial","river":"Godavari","basin":"Godavari","role":"dev","lat":18.836,"lon":79.445,"area":102900,"x":440.1,"y":246.6,"core":true},{"id":3056,"site":"Mangrul","river":"Godavari/Pranhita/Wardha/Penganga/Aran","basin":"Godavari","role":"dev","lat":20.189,"lon":77.987,"area":2500,"x":384.0,"y":192.4,"core":true},{"id":3057,"site":"Mirdapalli","river":"Godavari/Pranhita/Indravati","basin":"Godavari","role":"dev","lat":19.299,"lon":80.689,"area":24210,"x":487.9,"y":228.0,"core":true},{"id":3064,"site":"Nandgaon","river":"Godavari/Pranhita/Wardha/Wunna","basin":"Godavari","role":"dev","lat":20.526,"lon":78.809,"area":4580,"x":415.6,"y":179.0,"core":true},{"id":3068,"site":"Nowrangpur","river":"Godavari/Indravati","basin":"Godavari","role":"dev","lat":19.198,"lon":82.512,"area":3545,"x":558.0,"y":232.1,"core":true},{"id":3071,"site":"Pathagudem","river":"Godavari/Indravati","basin":"Godavari","role":"dev","lat":18.852,"lon":80.349,"area":40000,"x":474.8,"y":245.9,"core":true},{"id":3072,"site":"Pauni","river":"Godavari/Pranhita/Wainganga","basin":"Godavari","role":"dev","lat":20.793,"lon":79.648,"area":35520,"x":447.9,"y":168.3,"core":true},{"id":3073,"site":"Perur","river":"Godavari","basin":"Godavari","role":"dev","lat":18.587,"lon":80.396,"area":268200,"x":476.6,"y":256.5,"core":true},{"id":3074,"site":"P.G.Bridge","river":"Godavari/Pranhita/Wardha/Penganga","basin":"Godavari","role":"dev","lat":19.817,"lon":78.578,"area":18441,"x":406.7,"y":207.3,"core":true},{"id":3075,"site":"Polavaram","river":"Godavari","basin":"Godavari","role":"dev","lat":17.252,"lon":81.656,"area":307800,"x":525.1,"y":309.9,"core":true},{"id":3079,"site":"Purna","river":"Godavari/Purna","basin":"Godavari","role":"dev","lat":19.176,"lon":77.013,"area":15000,"x":346.6,"y":233.0,"core":true},{"id":3081,"site":"Rajegaon","river":"Godavari/Pranhita/Bagh","basin":"Godavari","role":"dev","lat":21.626,"lon":80.254,"area":5380,"x":471.2,"y":135.0,"core":true},{"id":3082,"site":"Rajoli","river":"Godavari/Pranhita/Wardha/Andhari/Mul","basin":"Godavari","role":"dev","lat":20.194,"lon":79.666,"area":1900,"x":448.5,"y":192.3,"core":true},{"id":3083,"site":"Ramakona","river":"Godavari/Pranhita/Kanhan","basin":"Godavari","role":"dev","lat":21.719,"lon":78.824,"area":2500,"x":416.2,"y":131.2,"core":true},{"id":3085,"site":"Saigaon","river":"Godavari/Manjira","basin":"Godavari","role":"dev","lat":18.076,"lon":77.052,"area":9960,"x":348.1,"y":277.0,"core":true},{"id":3089,"site":"Salebardi","river":"Godavari/Pranhita/Wainganga/Chulband","basin":"Godavari","role":"dev","lat":20.912,"lon":79.926,"area":1800,"x":458.6,"y":163.5,"core":true},{"id":3092,"site":"Saradaput","river":"Godavari/Sabari","basin":"Godavari","role":"dev","lat":18.613,"lon":82.143,"area":3047,"x":543.8,"y":255.5,"core":true},{"id":3094,"site":"Satrapur","river":"Godavari/Pranhita/Wainganga/Kanhan","basin":"Godavari","role":"dev","lat":21.217,"lon":79.233,"area":11100,"x":431.9,"y":151.3,"core":true},{"id":3098,"site":"Somanpally (Seasonal)","river":"Godavari/Maner","basin":"Godavari","role":"dev","lat":18.62,"lon":79.804,"area":12691,"x":453.9,"y":255.2,"core":true},{"id":3099,"site":"Sonarpal","river":"Godavari/Indravati/NarangiMarkandi","basin":"Godavari","role":"dev","lat":19.27,"lon":81.884,"area":1523,"x":533.8,"y":229.2,"core":true},{"id":3103,"site":"Tekra","river":"Godavari/Pranhita/Pranhita","basin":"Godavari","role":"dev","lat":18.978,"lon":79.947,"area":108780,"x":459.4,"y":240.9,"core":true},{"id":3105,"site":"Tumnar","river":"Godavari/Indravati/Dantewara","basin":"Godavari","role":"dev","lat":19.012,"lon":81.233,"area":1700,"x":508.8,"y":239.5,"core":true},{"id":3107,"site":"Wairagarh","river":"Godavari/Pranhita/Wainganga/Khobragarhi","basin":"Godavari","role":"dev","lat":20.422,"lon":80.092,"area":2600,"x":464.9,"y":183.1,"core":true},{"id":3109,"site":"Yelli","river":"Godavari","basin":"Godavari","role":"dev","lat":19.044,"lon":77.456,"area":53630,"x":363.6,"y":238.2,"core":true},{"id":3110,"site":"Zari","river":"Godavari/Purna Dudhna","basin":"Godavari","role":"dev","lat":19.396,"lon":76.771,"area":5550,"x":337.2,"y":224.2,"core":true},{"id":4003,"site":"Arjunwad (Seasonal)","river":"Krishna","basin":"Krishna","role":"holdout","lat":16.781,"lon":74.633,"area":12660,"x":255.1,"y":328.8,"core":true},{"id":4004,"site":"Bawapuram","river":"Krishna/Tungabhadra","basin":"Krishna","role":"holdout","lat":15.883,"lon":77.957,"area":67180,"x":382.9,"y":364.7,"core":true},{"id":4007,"site":"Dameracherla","river":"Krishna/Musi","basin":"Krishna","role":"holdout","lat":16.739,"lon":79.67,"area":11501,"x":448.7,"y":330.4,"core":true},{"id":4012,"site":"Halia","river":"Krishna/Halia","basin":"Krishna","role":"holdout","lat":16.79,"lon":79.339,"area":3100,"x":436.0,"y":328.4,"core":true},{"id":4013,"site":"Haralahalli","river":"Krishna/Tungabhadra","basin":"Krishna","role":"holdout","lat":14.831,"lon":75.674,"area":14582,"x":295.1,"y":406.8,"core":true},{"id":4017,"site":"Huvinhedigi","river":"Krishna","basin":"Krishna","role":"holdout","lat":16.491,"lon":76.923,"area":55150,"x":343.1,"y":340.4,"core":true},{"id":4021,"site":"Karad","river":"Krishna","basin":"Krishna","role":"holdout","lat":17.294,"lon":74.19,"area":5462,"x":238.0,"y":308.2,"core":true},{"id":4022,"site":"Keesara","river":"Krishna/Munneru","basin":"Krishna","role":"holdout","lat":16.716,"lon":80.316,"area":9854,"x":473.6,"y":331.4,"core":true},{"id":4026,"site":"Kurundwad","river":"Krishna","basin":"Krishna","role":"holdout","lat":16.684,"lon":74.603,"area":15190,"x":253.9,"y":332.7,"core":true},{"id":4028,"site":"Madhira","river":"Krishna/Munneru/Wyra","basin":"Krishna","role":"holdout","lat":16.918,"lon":80.356,"area":1850,"x":475.1,"y":323.3,"core":true},{"id":4031,"site":"Mantralayam","river":"Krishna/Tungabhadra","basin":"Krishna","role":"holdout","lat":15.948,"lon":77.426,"area":60630,"x":362.4,"y":362.1,"core":true},{"id":4038,"site":"Narsingpur","river":"Krishna/Bhima","basin":"Krishna","role":"holdout","lat":17.972,"lon":75.139,"area":22856,"x":274.5,"y":281.1,"core":true},{"id":4041,"site":"Paleru Bridge","river":"Krishna/Paleru","basin":"Krishna","role":"holdout","lat":16.949,"lon":80.048,"area":2928,"x":463.2,"y":322.0,"core":true},{"id":4044,"site":"Phulgaon (Seasonal)","river":"Krishna/Bhima","basin":"Krishna","role":"holdout","lat":18.667,"lon":74.002,"area":2205,"x":230.8,"y":253.3,"core":true},{"id":4047,"site":"Sadalga (Seasonal)","river":"Krishna/Dudhganga","basin":"Krishna","role":"holdout","lat":16.564,"lon":74.528,"area":2322,"x":251.0,"y":337.4,"core":true},{"id":4048,"site":"Samdoli (Seasonal)","river":"Krishna/Varna","basin":"Krishna","role":"holdout","lat":16.855,"lon":74.497,"area":1948,"x":249.8,"y":325.8,"core":true},{"id":4049,"site":"Sarati","river":"Krishna/Bhima/Nira","basin":"Krishna","role":"holdout","lat":17.911,"lon":75.007,"area":7200,"x":269.4,"y":283.5,"core":true},{"id":4054,"site":"Takli","river":"Krishna/Bhima","basin":"Krishna","role":"holdout","lat":17.413,"lon":75.848,"area":33916,"x":301.8,"y":303.5,"core":true},{"id":4056,"site":"Terwad (Seasonal)","river":"Krishna/Panchganga","basin":"Krishna","role":"holdout","lat":16.675,"lon":74.574,"area":2425,"x":252.8,"y":333.0,"core":true},{"id":4057,"site":"T. Ramapuram (Seasonal)","river":"Krishna/Tungabhadra/Hagari","basin":"Krishna","role":"holdout","lat":15.661,"lon":76.963,"area":23500,"x":344.6,"y":373.6,"core":true},{"id":4061,"site":"Wadakbal","river":"Krishna/Bhima/Sina","basin":"Krishna","role":"holdout","lat":17.534,"lon":75.885,"area":12092,"x":303.2,"y":298.6,"core":true},{"id":4064,"site":"Yadgir","river":"Krishna/Bhima","basin":"Krishna","role":"holdout","lat":16.738,"lon":77.125,"area":69863,"x":350.9,"y":330.5,"core":true},{"id":5002,"site":"Biligundulu","river":"Cauvery","basin":"Cauvery","role":"dev","lat":12.182,"lon":77.724,"area":36682,"x":373.9,"y":512.7,"core":true},{"id":5007,"site":"K.M.Vadi","river":"Cauvery/Lakshmanthirtha","basin":"Cauvery","role":"dev","lat":12.346,"lon":76.288,"area":1330,"x":318.7,"y":506.2,"core":true},{"id":5008,"site":"Kodumudi","river":"Cauvery","basin":"Cauvery","role":"dev","lat":11.081,"lon":77.89,"area":53233,"x":380.3,"y":556.8,"core":true},{"id":5010,"site":"Kudige","river":"Cauvery","basin":"Cauvery","role":"dev","lat":12.502,"lon":75.962,"area":1934,"x":306.1,"y":499.9,"core":true},{"id":5012,"site":"Musiri","river":"Cauvery","basin":"Cauvery","role":"dev","lat":10.943,"lon":78.435,"area":66243,"x":401.2,"y":562.3,"core":true},{"id":5013,"site":"Muthankera","river":"Cauvery/Kabini","basin":"Cauvery","role":"dev","lat":11.808,"lon":76.084,"area":1260,"x":310.8,"y":527.7,"core":true},{"id":5014,"site":"Nallamaranpatty","river":"Cauvery/Amaravathi","basin":"Cauvery","role":"dev","lat":10.881,"lon":77.985,"area":9080,"x":383.9,"y":564.8,"core":true},{"id":5015,"site":"Nellithurai","river":"Cauvery/Bhavani","basin":"Cauvery","role":"dev","lat":11.288,"lon":76.891,"area":1475,"x":341.9,"y":548.5,"core":true},{"id":5018,"site":"Savandapur","river":"Cauvery/Bhavani","basin":"Cauvery","role":"dev","lat":11.522,"lon":77.51,"area":5776,"x":365.7,"y":539.1,"core":true},{"id":5022,"site":"Thengumarahada","river":"Cauvery/Bhavani/Moyar","basin":"Cauvery","role":"dev","lat":11.573,"lon":76.919,"area":1370,"x":342.9,"y":537.1,"core":true},{"id":5027,"site":"T.K.Halli","river":"Cauvery/Shimsha","basin":"Cauvery","role":"dev","lat":12.417,"lon":77.192,"area":7890,"x":353.5,"y":503.3,"core":true},{"id":5028,"site":"T.Narasipur","river":"Cauvery/Kabini","basin":"Cauvery","role":"dev","lat":12.23,"lon":76.894,"area":7000,"x":342.0,"y":510.8,"core":true},{"id":5029,"site":"Urachikottai","river":"Cauvery","basin":"Cauvery","role":"dev","lat":11.478,"lon":77.7,"area":44100,"x":373.0,"y":540.9,"core":true},{"id":6001,"site":"Adityapur","river":"Subarnarekha/Kharkai","basin":"Subarnarekha","role":"dev","lat":22.791,"lon":86.174,"area":6309,"x":698.8,"y":88.3,"core":true},{"id":6006,"site":"Ghatsila","river":"Subarnarekha","basin":"Subarnarekha","role":"dev","lat":22.581,"lon":86.468,"area":14176,"x":710.1,"y":96.8,"core":true},{"id":6007,"site":"Govindapur","river":"Burhabalang","basin":"Subarnarekha","role":"dev","lat":21.548,"lon":86.918,"area":4495,"x":727.4,"y":138.1,"core":true},{"id":6008,"site":"Jamshedpur","river":"Subarnarekha","basin":"Subarnarekha","role":"dev","lat":22.816,"lon":86.216,"area":12649,"x":700.4,"y":87.4,"core":true},{"id":7001,"site":"Altuma","river":"Brahmani/Ramyala","basin":"Brahmani-Baitarani","role":"dev","lat":20.93,"lon":85.519,"area":830,"x":673.6,"y":162.8,"core":true},{"id":7002,"site":"Anandpur","river":"Baitarni","basin":"Brahmani-Baitarani","role":"dev","lat":21.211,"lon":86.121,"area":8570,"x":696.7,"y":151.6,"core":true},{"id":7005,"site":"Champua","river":"Baitarni","basin":"Brahmani-Baitarani","role":"dev","lat":22.066,"lon":85.673,"area":1710,"x":679.5,"y":117.4,"core":true},{"id":7007,"site":"Gomlai","river":"Brahmani","basin":"Brahmani-Baitarani","role":"dev","lat":21.838,"lon":84.942,"area":21950,"x":651.4,"y":126.5,"core":true},{"id":7008,"site":"Jaraikela","river":"Brahmani/Koel","basin":"Brahmani-Baitarani","role":"dev","lat":22.322,"lon":85.105,"area":9160,"x":657.7,"y":107.1,"core":true},{"id":7009,"site":"Jenapur","river":"Brahmani","basin":"Brahmani-Baitarani","role":"dev","lat":20.89,"lon":86.014,"area":33955,"x":692.7,"y":164.4,"core":true},{"id":7015,"site":"Tilga","river":"Brahmani/Sankh","basin":"Brahmani-Baitarani","role":"dev","lat":22.623,"lon":84.418,"area":3160,"x":631.3,"y":95.1,"core":true},{"id":8001,"site":"Andhiyarkhore","river":"Mahanadi/Seonath/Hamp","basin":"Mahanadi","role":"dev","lat":21.832,"lon":81.606,"area":2210,"x":523.1,"y":126.7,"core":true},{"id":8003,"site":"Bamnidhi","river":"Mahanadi/Hasdeo","basin":"Mahanadi","role":"dev","lat":21.899,"lon":82.712,"area":9730,"x":565.7,"y":124.1,"core":true},{"id":8005,"site":"Baronda","river":"Mahanadi/Pairi","basin":"Mahanadi","role":"dev","lat":20.913,"lon":81.886,"area":3225,"x":533.9,"y":163.5,"core":true},{"id":8006,"site":"Basantpur","river":"Mahanadi","basin":"Mahanadi","role":"dev","lat":21.727,"lon":82.788,"area":57780,"x":568.6,"y":130.9,"core":true},{"id":8009,"site":"Ghatora","river":"Mahanadi/Seonath","basin":"Mahanadi","role":"dev","lat":22.057,"lon":82.219,"area":3035,"x":546.7,"y":117.7,"core":true},{"id":8011,"site":"Jondhra","river":"Mahanadi/Seonath","basin":"Mahanadi","role":"dev","lat":21.716,"lon":82.347,"area":29645,"x":551.7,"y":131.4,"core":true},{"id":8013,"site":"Kantamal","river":"Mahanadi/Tel","basin":"Mahanadi","role":"dev","lat":20.65,"lon":83.722,"area":19600,"x":604.5,"y":174.0,"core":true},{"id":8016,"site":"Kesinga","river":"Mahanadi/Tel","basin":"Mahanadi","role":"dev","lat":20.204,"lon":83.223,"area":11960,"x":585.3,"y":191.8,"core":true},{"id":8020,"site":"Kotni","river":"Mahanadi/Seonath","basin":"Mahanadi","role":"dev","lat":21.236,"lon":81.247,"area":6990,"x":509.4,"y":150.6,"core":true},{"id":8021,"site":"Kurubhata","river":"Mahanadi/Mand","basin":"Mahanadi","role":"dev","lat":21.986,"lon":83.204,"area":4625,"x":584.6,"y":120.5,"core":true},{"id":8023,"site":"Manendragarh","river":"Mahanadi/Hasdeo","basin":"Mahanadi","role":"dev","lat":23.204,"lon":82.217,"area":1100,"x":546.7,"y":71.9,"core":true},{"id":8028,"site":"Patharidih","river":"Mahanadi/Seonath/Kharun","basin":"Mahanadi","role":"dev","lat":21.341,"lon":81.594,"area":2511,"x":522.7,"y":146.4,"core":true},{"id":8029,"site":"Rajim","river":"Mahanadi","basin":"Mahanadi","role":"dev","lat":20.974,"lon":81.878,"area":8760,"x":533.6,"y":161.1,"core":true},{"id":8030,"site":"Rampur","river":"Mahanadi/Jonk","basin":"Mahanadi","role":"dev","lat":21.652,"lon":82.517,"area":2920,"x":558.2,"y":133.9,"core":true},{"id":8031,"site":"Salebhata","river":"Mahanadi/Ong","basin":"Mahanadi","role":"dev","lat":20.983,"lon":83.539,"area":4650,"x":597.5,"y":160.7,"core":true},{"id":8034,"site":"Seorinarayan","river":"Mahanadi","basin":"Mahanadi","role":"dev","lat":21.717,"lon":82.597,"area":48050,"x":561.2,"y":131.3,"core":true},{"id":8035,"site":"Simga","river":"Mahanadi/Seonath","basin":"Mahanadi","role":"dev","lat":21.626,"lon":81.693,"area":30761,"x":526.5,"y":135.0,"core":true},{"id":8036,"site":"Sundergarh","river":"Mahanadi/Ib","basin":"Mahanadi","role":"dev","lat":22.115,"lon":84.011,"area":5870,"x":615.6,"y":115.4,"core":true},{"id":8038,"site":"Tikarapara","river":"Mahanadi","basin":"Mahanadi","role":"dev","lat":20.589,"lon":84.783,"area":124450,"x":645.3,"y":176.4,"core":true},{"id":9001,"site":"Alladupalli","river":"Pennar/Kunderu","basin":"Pennar","role":"dev","lat":14.717,"lon":78.669,"area":8758,"x":410.2,"y":411.3,"core":true},{"id":9002,"site":"Chennur","river":"Pennar","basin":"Pennar","role":"dev","lat":14.572,"lon":78.8,"area":37981,"x":415.3,"y":417.1,"core":true},{"id":9005,"site":"Kamalapuram","river":"Pennar/Papagani","basin":"Pennar","role":"dev","lat":14.581,"lon":78.678,"area":7187,"x":410.6,"y":416.8,"core":true},{"id":9008,"site":"Nandipalli","river":"Pennar/Sagaileru","basin":"Pennar","role":"dev","lat":14.721,"lon":79.019,"area":2486,"x":423.7,"y":411.2,"core":true},{"id":9009,"site":"Nellore","river":"Pennar","basin":"Pennar","role":"dev","lat":14.47,"lon":79.989,"area":50800,"x":461.0,"y":421.2,"core":true},{"id":9011,"site":"Singavaram","river":"Pennar/Chitravathi","basin":"Pennar","role":"dev","lat":14.598,"lon":78.013,"area":6262,"x":385.0,"y":416.1,"core":true},{"id":9012,"site":"Tadapatri","river":"Pennar","basin":"Pennar","role":"dev","lat":14.922,"lon":78.003,"area":12482,"x":384.6,"y":403.1,"core":true},{"id":10004,"site":"Chakaliya","river":"Mahi/Anas","basin":"Mahi","role":"dev","lat":23.054,"lon":74.32,"area":3121,"x":243.0,"y":77.8,"core":true},{"id":10005,"site":"Dhariawad","river":"Mahi/Som/Jakham","basin":"Mahi","role":"dev","lat":24.087,"lon":74.476,"area":1510,"x":249.0,"y":36.5,"core":true},{"id":10008,"site":"Khanpur","river":"Mahi","basin":"Mahi","role":"dev","lat":22.535,"lon":73.141,"area":32510,"x":197.7,"y":98.6,"core":true},{"id":10010,"site":"Mataji","river":"Mahi","basin":"Mahi","role":"dev","lat":23.35,"lon":74.718,"area":3880,"x":258.3,"y":66.0,"core":true},{"id":10011,"site":"Paderdibadi","river":"Mahi","basin":"Mahi","role":"dev","lat":23.767,"lon":74.137,"area":16247,"x":236.0,"y":49.3,"core":true},{"id":10013,"site":"Pingalwada","river":"Dhadhar (Independent river)","basin":"Mahi","role":"dev","lat":22.11,"lon":73.079,"area":2400,"x":195.3,"y":115.6,"core":true},{"id":10014,"site":"Rangeli","river":"Mahi/som","basin":"Mahi","role":"dev","lat":23.873,"lon":74.224,"area":8329,"x":239.3,"y":45.1,"core":true},{"id":11001,"site":"Derol Bridge","river":"Sabarmati","basin":"Sabarmati","role":"dev","lat":23.576,"lon":72.807,"area":6724,"x":184.8,"y":56.9,"core":true},{"id":11006,"site":"Kheroj","river":"Sabarmati","basin":"Sabarmati","role":"dev","lat":24.231,"lon":73.008,"area":3650,"x":192.6,"y":30.8,"core":true},{"id":11007,"site":"Ratanpur","river":"Sabarmati/Watrak","basin":"Sabarmati","role":"dev","lat":22.977,"lon":72.884,"area":2916,"x":187.8,"y":80.9,"core":true},{"id":12004,"site":"Barmanghat","river":"Narmada","basin":"Narmada","role":"dev","lat":23.031,"lon":79.016,"area":26453,"x":423.6,"y":78.8,"core":true},{"id":12006,"site":"Belkheri","river":"Narmada/Sher","basin":"Narmada","role":"dev","lat":22.928,"lon":79.34,"area":1508,"x":436.0,"y":82.9,"core":true},{"id":12009,"site":"Chanwada","river":"Narmada/Orsang","basin":"Narmada","role":"dev","lat":22.05,"lon":73.466,"area":3846,"x":210.2,"y":118.0,"core":true},{"id":12012,"site":"Chhidgaon","river":"Narmada/Ganjal","basin":"Narmada","role":"dev","lat":22.406,"lon":77.308,"area":1729,"x":357.9,"y":103.8,"core":true},{"id":12016,"site":"Dindori","river":"Narmada","basin":"Narmada","role":"dev","lat":22.948,"lon":81.076,"area":2292,"x":502.8,"y":82.1,"core":true},{"id":12018,"site":"Gadarwara","river":"Narmada/Sakkar","basin":"Narmada","role":"dev","lat":22.923,"lon":78.791,"area":2270,"x":414.9,"y":83.1,"core":true},{"id":12020,"site":"Garudeshwar","river":"Narmada","basin":"Narmada","role":"dev","lat":21.886,"lon":73.654,"area":87892,"x":217.4,"y":124.5,"core":true},{"id":12025,"site":"Handia","river":"Narmada","basin":"Narmada","role":"dev","lat":22.492,"lon":76.994,"area":54027,"x":345.8,"y":100.3,"core":true},{"id":12026,"site":"Hoshangabad","river":"Narmada","basin":"Narmada","role":"dev","lat":22.756,"lon":77.733,"area":44548,"x":374.2,"y":89.8,"core":true},{"id":12029,"site":"Kogaon","river":"Narmada/Kundi","basin":"Narmada","role":"dev","lat":22.101,"lon":75.684,"area":3919,"x":295.5,"y":115.9,"core":true},{"id":12035,"site":"Mandleshwar","river":"Narmada","basin":"Narmada","role":"dev","lat":22.168,"lon":75.661,"area":72809,"x":294.6,"y":113.3,"core":true},{"id":12036,"site":"Manot","river":"Narmada","basin":"Narmada","role":"dev","lat":22.736,"lon":80.513,"area":4667,"x":481.1,"y":90.6,"core":true},{"id":12038,"site":"Mohgaoan","river":"Narmada/Burhner","basin":"Narmada","role":"dev","lat":22.766,"lon":80.623,"area":3919,"x":485.4,"y":89.4,"core":true},{"id":12043,"site":"Patan","river":"Narmada/Hiran","basin":"Narmada","role":"dev","lat":23.311,"lon":79.662,"area":3950,"x":448.4,"y":67.6,"core":true},{"id":12046,"site":"Sandia","river":"Narmada","basin":"Narmada","role":"dev","lat":22.916,"lon":78.347,"area":33953,"x":397.9,"y":83.4,"core":true},{"id":13004,"site":"Burhanpur","river":"Tapi","basin":"Tapi","role":"dev","lat":21.299,"lon":76.235,"area":8487,"x":316.6,"y":148.0,"core":true},{"id":13006,"site":"Dedtalai","river":"Tapi","basin":"Tapi","role":"dev","lat":21.513,"lon":76.757,"area":6660,"x":336.7,"y":139.5,"core":true},{"id":13007,"site":"Ghala","river":"Tapi","basin":"Tapi","role":"dev","lat":21.297,"lon":73.025,"area":63325,"x":193.2,"y":148.1,"core":true},{"id":13008,"site":"Gidhade","river":"Tapi","basin":"Tapi","role":"dev","lat":21.295,"lon":74.809,"area":54750,"x":261.8,"y":148.2,"core":true},{"id":13010,"site":"Gopalkheda","river":"Tapi/Purna","basin":"Tapi","role":"dev","lat":20.874,"lon":76.991,"area":9500,"x":345.7,"y":165.0,"core":true},{"id":13012,"site":"Lakhpuri","river":"Tapi/Purna","basin":"Tapi","role":"dev","lat":20.848,"lon":77.361,"area":3560,"x":359.9,"y":166.1,"core":true},{"id":13013,"site":"Morane","river":"Tapi/Panjhra","basin":"Tapi","role":"dev","lat":20.909,"lon":74.713,"area":1933,"x":258.1,"y":163.6,"core":true},{"id":13016,"site":"Sarangkheda","river":"Tapi","basin":"Tapi","role":"dev","lat":21.428,"lon":74.527,"area":58400,"x":251.0,"y":142.9,"core":true},{"id":13017,"site":"Savkheda","river":"Tapi","basin":"Tapi","role":"dev","lat":21.148,"lon":75.241,"area":48136,"x":278.4,"y":154.1,"core":true},{"id":13025,"site":"Yerli","river":"Tapi/Purna","basin":"Tapi","role":"dev","lat":20.936,"lon":76.476,"area":16517,"x":325.9,"y":162.6,"core":true},{"id":14001,"site":"Badlapur","river":"Ulhas","basin":"West-flowing rivers (north)","role":"dev","lat":19.162,"lon":73.254,"area":785,"x":202.0,"y":233.5,"core":true},{"id":14003,"site":"Durvesh","river":"Vaitarna","basin":"West-flowing rivers (north)","role":"dev","lat":19.712,"lon":72.931,"area":2019,"x":189.6,"y":211.5,"core":true},{"id":14004,"site":"Gadat","river":"Ambika","basin":"West-flowing rivers (north)","role":"dev","lat":20.857,"lon":72.984,"area":1510,"x":191.6,"y":165.7,"core":true},{"id":14005,"site":"Ganjem","river":"Mandovi/Khadepar","basin":"West-flowing rivers (north)","role":"dev","lat":15.471,"lon":74.1,"area":880,"x":234.5,"y":381.2,"core":true},{"id":14008,"site":"Mahuwa","river":"Purna","basin":"West-flowing rivers (north)","role":"dev","lat":21.016,"lon":73.139,"area":1995,"x":197.6,"y":159.4,"core":true},{"id":14009,"site":"Mangaon (Seasonal)","river":"Savitri/Kal","basin":"West-flowing rivers (north)","role":"dev","lat":18.232,"lon":73.283,"area":259,"x":203.1,"y":270.7,"core":true},{"id":14012,"site":"Nanipalson","river":"Damanganga","basin":"West-flowing rivers (north)","role":"dev","lat":20.203,"lon":73.281,"area":764,"x":203.1,"y":191.9,"core":true},{"id":14014,"site":"Ozerkheda","river":"Wagh/Damanganga","basin":"West-flowing rivers (north)","role":"dev","lat":20.111,"lon":73.265,"area":640,"x":202.4,"y":195.6,"core":true},{"id":15003,"site":"Ambarampalayam","river":"Bharathapuzha/Kannadipuzha/Aliyar","basin":"West-flowing rivers (south)","role":"dev","lat":10.63,"lon":76.946,"area":950,"x":344.0,"y":574.8,"core":true},{"id":15005,"site":"Arangaly","river":"Periyar/Chalakudy","basin":"West-flowing rivers (south)","role":"dev","lat":10.281,"lon":76.315,"area":1342,"x":319.7,"y":588.7,"core":true},{"id":15007,"site":"Ayilam","river":"Vamanapuram","basin":"West-flowing rivers (south)","role":"dev","lat":8.715,"lon":76.85,"area":540,"x":340.3,"y":651.4,"core":true},{"id":15008,"site":"Bantwal","river":"Nethravathi","basin":"West-flowing rivers (south)","role":"dev","lat":12.881,"lon":75.041,"area":3184,"x":270.7,"y":484.8,"core":true},{"id":15009,"site":"Erinjipuzha","river":"Payaswani","basin":"West-flowing rivers (south)","role":"dev","lat":12.479,"lon":75.147,"area":957,"x":274.8,"y":500.8,"core":true},{"id":15010,"site":"Halady","river":"Halady","basin":"West-flowing rivers (south)","role":"dev","lat":13.582,"lon":74.858,"area":583,"x":263.7,"y":456.7,"core":true},{"id":15011,"site":"Kalampur","river":"Muvattupuzha/Kaliyar","basin":"West-flowing rivers (south)","role":"dev","lat":9.991,"lon":76.632,"area":405,"x":331.9,"y":600.4,"core":true},{"id":15012,"site":"Kallooppara","river":"Pampa/Manimala","basin":"West-flowing rivers (south)","role":"dev","lat":9.404,"lon":76.65,"area":731,"x":332.6,"y":623.9,"core":true},{"id":15013,"site":"Karathodu","river":"Kadalundi","basin":"West-flowing rivers (south)","role":"dev","lat":11.057,"lon":76.039,"area":750,"x":309.1,"y":557.7,"core":true},{"id":15014,"site":"Kidangoor","river":"Meenachil","basin":"West-flowing rivers (south)","role":"dev","lat":9.676,"lon":76.606,"area":615,"x":330.9,"y":613.0,"core":true},{"id":15016,"site":"Kumbidi","river":"Bharathapuzha","basin":"West-flowing rivers (south)","role":"dev","lat":10.85,"lon":76.02,"area":5755,"x":308.4,"y":566.0,"core":true},{"id":15017,"site":"Kuniyil","river":"Chaliyar","basin":"West-flowing rivers (south)","role":"dev","lat":11.239,"lon":76.023,"area":1876,"x":308.5,"y":550.4,"core":true},{"id":15019,"site":"Malakkara","river":"Pampa","basin":"West-flowing rivers (south)","role":"dev","lat":9.332,"lon":76.663,"area":1713,"x":333.1,"y":626.7,"core":true},{"id":15020,"site":"Mankara","river":"Bharathapuzha","basin":"West-flowing rivers (south)","role":"dev","lat":10.761,"lon":76.486,"area":2775,"x":326.3,"y":569.6,"core":true},{"id":15021,"site":"Neeleswaram","river":"Periyar","basin":"West-flowing rivers (south)","role":"dev","lat":10.183,"lon":76.5,"area":4234,"x":326.8,"y":592.7,"core":true},{"id":15022,"site":"Pattazhy","river":"Kallada","basin":"West-flowing rivers (south)","role":"dev","lat":9.073,"lon":76.761,"area":1210,"x":336.9,"y":637.1,"core":true},{"id":15023,"site":"Perumannu","river":"Valapatnam","basin":"West-flowing rivers (south)","role":"dev","lat":11.981,"lon":75.588,"area":1070,"x":291.7,"y":520.7,"core":true},{"id":15024,"site":"Pulamanthole","river":"Bharathapuzha/Pulanthodu","basin":"West-flowing rivers (south)","role":"dev","lat":10.899,"lon":76.197,"area":940,"x":315.2,"y":564.0,"core":true},{"id":15026,"site":"Ramamangalam","river":"Muvattupuzha","basin":"West-flowing rivers (south)","role":"dev","lat":9.845,"lon":76.467,"area":1208,"x":325.5,"y":606.2,"core":true},{"id":15030,"site":"Thumpamon","river":"Pamba/Achankovil","basin":"West-flowing rivers (south)","role":"dev","lat":9.232,"lon":76.715,"area":810,"x":335.1,"y":630.7,"core":true},{"id":15032,"site":"Yennehole","river":"Swarna","basin":"West-flowing rivers (south)","role":"dev","lat":13.294,"lon":74.981,"area":327,"x":268.4,"y":468.2,"core":true},{"id":16001,"site":"Anakapalle","river":"Sarada","basin":"East-flowing rivers (north)","role":"dev","lat":17.7,"lon":82.995,"area":2090,"x":576.6,"y":292.0,"core":true},{"id":16007,"site":"Kashinagar","river":"Vamsadhara","basin":"East-flowing rivers (north)","role":"dev","lat":18.848,"lon":83.873,"area":7820,"x":610.3,"y":246.1,"core":true},{"id":16012,"site":"Purushottampur","river":"Rushikulya","basin":"East-flowing rivers (north)","role":"dev","lat":19.517,"lon":84.883,"area":7112,"x":649.2,"y":219.3,"core":true},{"id":16014,"site":"Srikakulam","river":"Nagavali","basin":"East-flowing rivers (north)","role":"dev","lat":18.313,"lon":83.884,"area":9500,"x":610.8,"y":267.5,"core":true},{"id":17006,"site":"Gummanur","river":"Ponnaiyar","basin":"East-flowing rivers (south)","role":"holdout","lat":12.555,"lon":78.139,"area":4620,"x":389.8,"y":497.8,"core":true},{"id":17009,"site":"Kudalaiyathur","river":"Vellar","basin":"East-flowing rivers (south)","role":"holdout","lat":11.422,"lon":79.472,"area":7890,"x":441.1,"y":543.1,"core":true},{"id":17011,"site":"Murappanadu","river":"Tambraparni","basin":"East-flowing rivers (south)","role":"holdout","lat":8.714,"lon":77.835,"area":4380,"x":378.2,"y":651.4,"core":true},{"id":17012,"site":"Naidupet","river":"Swarnamukhi","basin":"East-flowing rivers (south)","role":"holdout","lat":13.947,"lon":79.897,"area":2650,"x":457.5,"y":442.1,"core":true},{"id":17019,"site":"Theni","river":"Vaigai/Suruliar","basin":"East-flowing rivers (south)","role":"holdout","lat":10.001,"lon":77.485,"area":1200,"x":364.7,"y":600.0,"core":true},{"id":17022,"site":"Vazhavachanur","river":"Ponnaiyar","basin":"East-flowing rivers (south)","role":"holdout","lat":12.066,"lon":78.978,"area":10780,"x":422.1,"y":517.4,"core":true},{"id":17024,"site":"Villupuram","river":"Ponnaiyar","basin":"East-flowing rivers (south)","role":"holdout","lat":11.871,"lon":79.459,"area":12900,"x":440.6,"y":525.2,"core":true}],"map":{"w":826.7,"h":720.0,"paths":["M471.8,251.0L465.9,252.8L458.3,247.6L459.1,238.7L456.0,235.9L459.3,233.2L460.6,224.0L452.9,216.0L441.1,220.0L432.3,215.3L430.3,221.6L420.7,217.9L421.2,213.8L417.3,213.7L416.8,209.5L403.4,208.3L396.3,203.4L395.5,206.1L398.5,208.8L394.6,213.4L396.2,221.8L391.3,223.5L391.2,230.5L386.1,230.3L382.4,226.3L379.3,227.8L381.0,229.3L378.8,236.5L375.4,238.7L382.5,246.8L375.0,252.0L374.5,257.7L369.0,258.0L368.6,262.1L366.3,262.3L368.0,267.6L363.9,269.5L360.1,267.7L362.0,264.3L358.4,261.7L350.3,273.8L344.2,272.5L342.9,283.4L336.1,284.0L338.0,286.9L334.2,292.8L331.3,289.2L330.0,291.8L327.7,289.6L326.4,293.6L320.3,296.1L322.3,307.4L316.9,304.8L314.4,308.0L312.2,305.2L304.9,307.1L303.2,303.3L299.6,305.2L293.5,300.9L291.2,304.7L294.4,309.5L294.9,321.5L291.2,319.6L288.0,322.2L287.1,320.5L279.9,321.7L277.4,326.3L272.6,321.9L266.5,322.2L266.1,329.1L257.3,331.4L257.1,335.7L252.6,337.8L248.7,333.4L245.3,338.9L241.1,338.1L240.2,340.1L244.7,343.8L243.2,349.1L249.2,350.0L249.6,355.8L244.6,357.8L248.5,358.3L246.3,365.8L243.7,365.8L245.4,366.0L244.5,369.0L238.7,368.7L231.5,375.8L225.2,368.0L222.4,371.0L217.4,370.2L209.8,357.8L209.5,347.6L208.0,349.0L207.1,346.5L209.1,345.1L206.6,345.6L206.4,344.9L207.9,343.7L210.8,343.6L211.1,343.5L211.2,343.3L211.4,343.3L210.5,342.4L206.3,344.1L204.4,339.5L205.8,335.1L202.1,318.9L203.3,317.9L203.4,315.4L199.5,308.0L201.8,308.8L201.6,307.1L198.7,303.8L200.4,302.5L197.5,297.7L197.8,291.1L189.6,271.2L190.9,268.8L196.3,274.4L194.2,268.1L196.2,269.4L196.6,266.8L194.0,267.5L193.4,269.4L188.9,265.5L189.7,258.4L184.3,242.4L186.0,238.1L183.5,220.5L181.4,218.4L181.3,216.3L184.1,216.1L181.8,215.9L179.3,202.7L180.3,201.7L180.9,201.7L180.9,201.3L181.5,201.3L182.0,203.6L183.6,204.0L181.0,197.2L186.8,191.0L190.8,191.6L193.8,197.3L199.1,198.1L203.8,191.6L208.3,192.1L206.9,184.3L211.2,178.5L207.3,174.2L209.5,171.3L217.3,177.4L220.9,177.4L224.5,175.2L223.5,172.3L228.5,170.3L226.9,160.7L223.3,156.6L216.0,155.3L214.4,153.2L223.6,153.0L223.9,149.2L228.5,148.0L228.3,143.8L233.1,141.0L240.4,141.3L243.5,138.2L236.8,137.3L225.1,140.1L222.3,134.9L226.6,133.0L222.8,127.0L235.6,122.0L241.5,122.7L245.6,118.6L250.9,123.6L250.1,131.0L253.1,133.4L265.4,134.8L280.7,144.6L311.3,145.2L314.4,152.6L311.9,153.8L314.0,156.8L318.3,157.2L325.1,155.7L326.5,152.3L331.6,152.6L333.1,149.0L331.5,146.7L337.8,141.4L338.2,136.2L342.3,136.1L348.9,131.2L354.1,132.4L357.2,129.6L364.5,129.2L367.0,131.8L369.6,138.5L362.4,138.5L364.8,145.0L366.5,143.2L373.3,145.7L376.9,143.6L382.2,144.6L398.8,135.5L401.9,140.1L420.5,140.6L419.7,136.4L431.6,134.1L431.8,131.1L442.0,133.0L443.7,138.3L451.3,135.8L457.2,139.3L469.2,134.6L475.9,139.1L477.3,144.9L481.7,144.2L487.6,147.5L479.3,153.0L478.3,156.1L479.2,162.8L482.4,162.6L484.0,172.6L479.9,175.3L485.7,176.1L485.5,186.6L476.6,190.2L476.9,194.1L480.8,194.2L482.8,197.1L481.8,202.4L477.2,202.5L480.9,205.2L476.9,208.2L482.4,207.3L487.4,212.0L487.0,215.5L493.5,217.3L495.9,220.7L490.5,228.4L485.0,227.6L483.4,223.9L476.5,230.2L471.9,240.3L475.0,246.9L470.8,249.4L471.8,251.0Z","M590.3,0.1L591.9,8.7L597.8,15.1L596.1,19.0L592.0,20.2L594.3,25.4L591.4,27.5L590.4,35.0L584.8,43.1L579.9,45.2L574.3,44.9L563.9,35.0L566.9,33.4L568.0,26.2L565.7,24.8L566.0,17.9L569.1,16.8L568.1,14.3L554.8,11.9L554.3,16.4L549.8,15.8L550.0,13.3L547.1,12.7L547.9,12.1L548.0,9.2L545.1,10.7L546.1,7.2L542.8,8.6L534.6,4.3L534.7,0.0L590.3,0.1ZM508.3,0.1L505.2,4.5L503.1,2.0L493.3,3.3L491.9,1.4L508.3,0.1ZM409.3,0.6L414.9,7.6L413.4,16.0L418.5,14.3L421.9,20.2L419.7,21.6L422.7,23.1L415.5,32.9L404.4,24.5L399.4,29.5L397.2,26.9L398.6,24.6L393.2,19.2L395.1,13.5L391.2,4.8L397.4,0.0L409.3,0.6Z","M452.4,526.4L450.3,528.3L453.6,528.6L452.1,537.7L455.4,546.0L455.8,560.7L451.7,559.9L450.6,561.8L454.8,564.6L455.7,566.9L456.8,587.8L437.9,587.3L434.4,589.5L431.7,594.1L433.2,598.4L422.2,612.4L419.0,620.4L425.5,628.1L435.6,627.2L439.6,633.6L431.0,628.7L421.6,629.0L400.1,635.6L391.8,642.9L390.7,649.0L392.3,649.8L387.1,665.0L378.4,669.9L376.6,673.5L369.3,674.1L367.4,676.9L358.2,675.1L349.8,668.3L353.0,667.1L353.8,660.0L357.0,658.1L352.6,650.3L356.0,645.0L351.7,639.1L356.4,633.9L356.9,627.9L361.9,619.6L359.9,615.9L352.4,615.5L356.5,601.4L353.8,595.7L356.3,595.1L357.4,591.3L355.1,585.9L345.4,591.2L339.5,587.9L338.8,575.0L341.5,574.4L342.5,568.7L332.9,562.8L334.5,558.9L337.1,558.8L338.4,557.8L334.5,553.9L335.8,551.3L324.5,552.0L328.7,545.6L317.1,541.3L316.6,537.2L327.3,531.8L329.8,535.4L340.2,536.2L342.5,528.2L346.6,527.4L350.6,531.2L350.3,529.1L355.7,527.5L362.5,529.6L365.1,522.3L372.0,521.9L375.9,515.3L374.0,512.7L364.2,510.3L369.8,505.3L369.1,493.3L374.5,493.1L378.2,485.2L381.8,484.4L381.4,486.9L384.3,487.8L386.6,485.8L393.4,489.6L392.6,492.6L402.4,495.0L403.3,490.3L405.9,492.0L409.8,482.7L408.4,480.3L412.0,477.3L418.8,476.1L418.8,478.7L420.5,478.8L420.0,476.8L422.8,476.5L429.2,479.2L432.0,473.2L434.8,475.8L439.8,472.5L440.1,467.9L437.6,467.7L439.7,465.9L443.6,466.5L445.2,469.7L449.2,468.2L452.2,471.7L453.5,470.3L451.2,468.4L459.0,465.8L460.3,461.2L463.2,460.3L461.4,458.3L470.7,461.2L471.7,457.4L474.7,467.5L471.2,488.8L466.7,503.6L455.6,517.9L455.3,521.8L451.8,523.2L451.7,519.7L449.7,521.4L451.4,523.8L449.7,523.2L448.9,524.8L452.5,525.0L452.4,526.4Z","M471.4,250.3L475.0,246.9L471.9,240.3L476.5,230.2L483.4,223.9L485.0,227.6L490.5,228.4L495.9,220.7L493.5,217.3L487.0,215.5L487.4,212.0L482.4,207.3L476.9,208.2L480.9,205.2L477.2,202.5L481.8,202.4L482.8,197.1L480.8,194.2L476.9,194.1L476.6,190.2L485.5,186.6L485.7,176.1L479.9,175.3L484.0,172.6L482.4,162.6L479.2,162.8L477.7,159.6L479.3,153.0L487.5,148.0L489.3,131.5L492.9,130.1L493.1,121.7L496.3,115.6L500.1,117.5L500.6,111.2L504.4,108.3L504.1,102.5L512.4,99.0L515.5,102.4L519.9,98.4L523.8,98.5L526.1,94.1L529.4,93.4L529.7,85.0L536.2,81.7L536.1,76.8L544.5,74.3L545.8,67.0L537.7,63.4L535.4,58.7L528.6,57.2L524.0,60.7L522.0,56.6L526.6,51.1L523.3,43.9L525.6,43.0L530.3,47.6L535.6,45.2L558.4,48.7L569.1,41.5L574.8,45.1L582.2,44.6L589.1,35.8L593.4,36.6L596.6,38.9L598.7,45.5L603.9,47.2L606.5,55.6L612.8,57.2L612.6,55.2L615.8,54.6L613.8,64.9L618.1,66.7L616.5,73.8L620.3,76.7L621.0,81.4L622.4,78.9L630.4,82.9L623.7,93.3L615.6,97.1L615.6,105.1L601.7,111.1L598.4,115.8L600.1,117.3L597.7,117.7L597.4,121.2L599.5,126.0L594.8,128.5L592.8,132.8L595.6,134.7L591.5,135.2L589.8,139.9L592.4,145.9L587.1,144.9L587.2,149.1L581.8,155.8L575.4,152.3L562.9,153.8L562.5,158.5L556.2,166.9L551.8,164.4L552.8,174.7L551.1,177.5L555.1,182.6L553.7,197.7L565.8,200.2L565.5,206.6L561.1,209.0L561.5,205.3L555.5,203.6L551.6,206.6L547.4,199.9L541.0,197.7L539.6,199.4L536.2,195.8L533.3,198.2L532.7,203.3L540.8,208.4L539.4,219.7L545.6,222.9L544.7,234.7L547.8,243.2L545.1,243.9L541.6,251.3L534.2,253.7L536.9,256.4L528.7,265.9L520.1,269.7L515.0,288.2L506.2,285.7L500.2,288.1L499.0,272.8L494.7,274.4L493.6,270.3L490.0,273.2L491.9,269.6L489.7,263.5L481.2,255.2L474.7,256.2L471.4,250.3Z","M190.8,191.6L186.8,191.0L185.5,194.3L182.2,194.6L183.7,186.6L188.3,184.8L186.7,181.3L188.5,177.0L182.8,157.9L177.8,156.4L179.1,151.0L176.8,147.3L182.1,138.4L177.3,136.6L184.8,133.7L174.1,132.9L179.4,121.8L175.3,124.8L173.3,122.6L176.1,112.1L183.0,113.0L188.9,110.4L189.9,107.6L182.9,110.7L173.6,107.2L170.2,111.6L168.2,107.4L166.2,114.3L162.4,117.7L163.1,127.1L160.0,127.7L165.7,135.0L158.0,147.9L158.1,152.1L136.8,161.2L132.2,165.2L108.5,172.3L94.1,166.1L83.0,157.8L66.2,138.4L46.8,121.7L36.0,107.8L37.8,103.5L41.1,100.8L39.8,104.4L45.9,103.1L44.5,112.2L51.2,106.9L63.7,105.6L66.5,100.6L67.4,103.3L67.8,101.0L68.4,103.4L70.1,101.1L71.9,102.9L76.0,98.3L81.7,97.9L91.4,83.7L93.3,83.8L91.6,88.2L94.7,86.4L96.9,82.6L93.5,81.3L97.7,81.6L104.3,71.4L88.4,71.6L78.3,81.9L79.7,82.3L80.0,83.2L65.9,87.8L54.5,87.5L56.6,89.1L46.0,86.5L24.3,73.2L22.3,70.7L24.2,69.8L24.4,68.0L20.8,70.1L23.8,66.8L15.4,63.2L18.5,59.3L12.5,60.2L11.5,56.3L4.6,55.4L3.6,53.3L6.6,52.2L8.0,45.0L14.1,40.6L29.0,41.2L29.4,28.2L31.8,27.3L33.2,31.5L36.4,27.9L38.6,31.1L61.3,28.3L66.6,33.2L77.9,33.2L81.1,28.2L98.9,23.1L98.9,29.9L108.7,30.9L113.3,26.1L120.0,23.8L115.3,22.2L114.9,18.3L119.1,12.4L126.4,15.4L134.7,12.7L140.6,14.4L145.8,12.9L148.1,15.6L148.9,12.7L151.5,14.7L156.2,11.5L160.1,15.2L167.2,14.9L163.3,16.6L170.8,19.4L171.4,23.4L174.5,19.2L180.1,21.4L181.9,25.4L188.8,26.5L191.3,25.3L191.9,20.9L195.6,20.1L195.2,24.1L200.7,25.4L194.8,32.2L201.6,39.9L206.2,35.8L208.4,42.8L205.8,48.3L211.8,51.9L212.4,55.7L214.3,53.9L217.5,55.2L216.4,62.1L224.1,62.1L226.5,66.6L229.3,64.8L234.8,68.3L235.6,73.0L240.2,72.6L243.8,81.9L249.0,85.8L245.3,94.6L240.8,94.2L236.5,99.1L232.3,98.3L235.3,103.2L238.0,101.0L241.9,104.2L238.0,107.2L233.2,105.8L233.5,111.2L237.6,116.6L234.2,119.4L236.4,122.1L222.8,127.0L226.6,133.0L222.3,134.9L225.1,140.1L237.0,137.2L242.2,137.3L243.0,140.1L228.3,143.8L228.5,148.0L223.9,149.2L223.6,153.0L214.4,153.2L223.3,156.6L226.9,160.7L228.5,170.3L223.5,172.3L224.5,175.2L220.9,177.4L217.3,177.4L209.5,171.3L207.3,174.2L211.2,178.5L206.9,184.3L208.3,192.1L203.8,191.6L201.9,195.1L199.5,194.8L200.6,192.6L198.7,191.7L195.0,193.8L194.6,191.1L198.7,188.5L196.0,185.6L193.6,188.3L189.1,188.7L190.8,191.6Z","M785.1,0.0L781.6,5.1L778.9,4.9L777.7,1.6L774.3,2.6L775.7,5.6L769.9,12.5L776.3,21.0L797.3,29.0L797.7,34.1L795.7,35.5L798.6,40.7L794.7,45.2L791.1,45.6L790.5,54.1L797.5,60.8L799.8,60.1L796.6,69.8L799.4,71.3L800.2,69.8L807.2,71.4L801.5,79.6L806.3,86.2L804.1,89.7L807.3,108.5L811.1,113.6L809.1,116.0L810.1,122.0L807.3,121.5L807.8,123.9L804.9,122.3L807.0,115.6L804.4,120.6L804.7,115.8L803.3,117.3L803.7,122.8L798.4,121.8L800.4,121.3L797.7,120.4L799.1,115.6L796.1,117.1L797.9,114.1L795.4,116.9L797.4,119.5L793.4,121.8L796.0,111.7L794.0,110.1L791.8,124.2L789.9,123.8L789.5,125.9L788.1,124.8L789.2,123.3L788.3,124.1L789.2,123.0L788.3,121.3L790.2,120.4L790.3,117.9L789.8,120.5L788.2,120.9L787.1,124.0L786.6,123.8L786.9,121.5L786.2,120.5L784.0,124.1L784.7,120.3L783.9,119.8L783.7,128.2L782.7,126.9L783.3,123.8L782.5,121.1L783.0,124.7L781.0,125.6L779.0,125.4L779.6,124.0L779.6,122.2L779.5,121.6L779.1,121.5L778.8,125.6L780.7,125.9L780.5,126.5L779.1,127.3L778.9,128.0L780.7,136.7L779.0,137.7L777.5,135.8L778.1,134.2L777.2,128.7L774.6,121.8L777.4,117.8L776.9,113.9L775.8,112.3L771.6,111.6L772.2,109.8L768.9,110.1L769.6,111.9L775.0,113.4L775.4,116.9L771.3,119.3L769.8,117.1L768.7,117.0L770.9,120.1L768.5,125.2L761.6,131.6L749.3,135.6L747.6,129.3L741.2,127.8L739.6,121.7L737.1,120.8L734.4,125.4L732.0,125.3L731.6,118.5L719.9,114.1L720.1,111.3L726.3,108.1L721.0,101.8L722.9,100.5L721.6,97.0L717.4,97.0L716.5,93.4L708.2,88.4L708.9,83.0L712.3,82.1L713.2,80.5L700.7,80.2L693.8,74.2L688.0,73.8L685.2,69.3L688.4,64.1L686.8,61.5L694.2,60.5L694.1,56.5L698.2,57.6L697.8,61.4L704.0,63.5L709.9,54.8L722.8,52.4L722.8,46.7L726.3,47.2L726.5,44.9L735.3,48.2L737.0,47.0L735.5,45.2L739.8,47.0L740.0,43.6L741.9,43.9L740.0,38.2L748.2,40.6L749.7,35.3L752.0,36.7L752.7,33.6L757.3,34.0L755.0,30.3L761.4,24.7L762.4,20.1L760.2,16.7L765.7,16.1L765.5,11.1L762.0,9.6L767.5,3.1L766.1,0.0L785.1,0.0Z","M514.9,287.4L518.4,280.9L520.1,269.7L528.7,265.9L536.9,256.4L534.2,253.7L541.6,251.3L545.1,243.9L547.8,243.2L544.7,234.7L545.6,222.9L539.4,219.7L540.8,208.4L532.7,203.3L533.3,198.2L536.2,195.8L539.6,199.4L541.0,197.7L547.4,199.9L551.6,206.6L555.5,203.6L561.5,205.3L561.1,209.0L565.5,206.6L565.8,200.2L553.7,197.7L555.1,182.6L551.1,177.5L552.8,174.7L551.8,164.4L556.2,166.9L562.5,158.5L562.9,153.8L575.4,152.3L581.8,155.8L587.2,149.1L587.1,144.9L592.4,145.9L589.8,139.9L591.5,135.2L595.6,134.7L592.8,132.8L594.8,128.5L599.5,126.0L597.4,121.2L597.7,117.7L600.1,117.3L598.4,115.8L601.7,111.1L615.6,105.1L617.0,101.2L614.5,99.1L626.4,106.3L656.2,100.6L658.2,108.2L653.2,116.7L657.4,115.8L662.9,119.6L667.9,113.6L680.0,117.8L684.7,115.4L685.9,116.8L683.1,120.2L688.5,121.2L693.3,112.4L691.1,110.1L694.0,107.7L692.0,106.3L693.1,104.2L690.5,101.4L693.9,97.3L708.7,107.7L711.2,106.1L717.0,109.3L720.1,111.3L719.9,114.1L729.2,116.6L731.6,118.5L732.0,125.3L734.4,125.4L737.1,120.8L740.4,123.0L741.2,127.8L748.6,130.7L749.2,135.9L733.2,141.5L725.3,151.1L724.9,156.1L729.7,167.1L729.3,168.3L725.4,168.6L723.3,169.9L723.1,170.7L731.4,169.2L732.7,171.4L721.0,179.3L719.4,184.1L722.3,184.6L722.7,180.3L722.2,186.8L712.2,193.1L707.2,201.7L668.0,216.0L651.0,229.0L644.6,236.9L640.9,233.3L638.0,234.7L640.9,236.9L638.2,239.0L637.2,237.0L633.4,240.4L631.3,239.1L632.0,243.1L627.9,244.7L627.5,248.5L618.6,249.7L616.6,247.3L611.0,247.4L607.2,239.2L605.3,240.5L606.6,243.5L600.8,233.5L597.3,239.5L596.0,239.2L596.4,237.2L594.7,236.2L594.4,241.8L588.6,240.0L592.3,246.3L584.9,250.7L582.0,248.5L577.2,254.1L580.3,258.1L577.5,261.7L578.8,264.8L574.4,265.5L569.1,262.0L568.0,266.4L563.0,267.9L562.8,270.5L560.6,267.4L562.2,265.6L558.9,263.8L556.8,258.0L552.2,263.1L551.2,266.9L553.3,268.1L550.2,271.8L552.6,274.0L548.5,280.2L539.5,277.2L523.6,287.1L514.9,287.4Z","M595.9,18.7L597.8,15.1L591.9,8.7L590.3,0.0L736.5,0.9L732.5,15.7L728.2,13.9L727.3,18.2L722.4,15.3L717.8,17.4L715.3,15.7L709.2,25.3L702.7,21.4L704.5,16.5L696.9,15.5L694.2,8.8L690.0,10.7L682.0,7.2L678.6,12.6L679.3,16.8L676.0,16.0L673.8,19.2L667.9,17.8L657.1,25.1L656.7,22.7L650.0,25.1L646.1,18.8L640.8,24.4L637.0,23.6L634.3,28.5L634.6,26.7L631.5,26.8L626.6,22.0L626.6,17.6L619.4,20.9L615.5,14.3L610.3,18.7L595.9,18.7Z","M340.8,0.1L344.1,5.2L338.5,7.6L340.5,10.3L347.2,11.5L348.8,17.1L345.2,21.6L342.9,18.3L339.0,18.7L340.0,27.1L344.0,32.0L342.2,34.9L334.5,33.3L334.3,28.6L327.9,33.7L325.7,31.0L315.8,31.6L314.7,26.8L312.5,36.5L306.2,39.3L305.2,44.1L298.9,46.1L296.3,44.0L295.6,49.8L286.9,43.4L289.2,39.0L296.7,41.3L301.3,37.7L298.0,34.3L301.1,30.7L297.1,24.1L299.5,21.1L301.3,23.4L303.8,22.3L304.7,18.6L301.2,16.2L301.3,10.9L299.3,9.5L292.6,12.8L277.6,11.9L277.8,6.2L281.1,8.0L285.5,5.2L279.3,5.0L279.2,1.5L281.2,4.6L281.2,0.0L340.8,0.1ZM275.2,0.2L273.6,4.9L270.5,6.2L262.8,1.6L263.4,9.0L269.8,10.7L264.9,14.7L261.5,8.8L260.4,13.5L262.0,13.4L262.0,14.0L258.0,20.5L263.5,22.2L259.4,29.9L265.2,30.9L265.4,35.6L268.5,39.0L265.4,45.1L266.7,54.9L253.9,61.7L250.5,66.9L259.2,71.7L243.4,77.6L240.2,72.6L235.6,73.0L236.0,69.4L229.3,64.8L226.5,66.6L224.1,62.1L216.4,62.1L217.5,55.2L214.3,53.9L212.4,55.7L211.8,51.9L205.8,48.3L208.4,42.8L206.2,35.8L201.6,39.9L194.8,32.2L200.7,25.4L195.2,24.1L195.6,20.1L191.9,20.9L191.3,25.3L188.8,26.5L181.9,25.4L180.1,21.4L174.5,19.2L171.4,23.4L170.8,19.4L163.3,16.6L167.2,14.9L160.1,15.2L156.2,11.5L151.5,14.7L148.9,12.7L148.1,15.6L145.8,12.9L140.6,14.4L135.7,12.6L126.4,15.4L117.9,11.3L112.2,0.0L275.2,0.2Z","M369.3,268.7L366.3,262.3L368.6,262.1L369.0,258.0L374.5,257.7L375.0,252.0L382.5,246.8L375.4,238.7L378.8,236.5L381.0,229.3L379.3,227.8L382.4,226.3L386.1,230.3L391.2,230.5L391.3,223.5L396.2,221.8L394.6,213.4L398.5,208.8L395.5,206.1L396.3,203.4L403.4,208.3L416.8,209.5L417.3,213.7L421.2,213.8L420.7,217.9L430.3,221.6L432.3,215.3L441.1,220.0L451.9,215.7L460.6,224.0L459.3,233.2L456.0,235.9L459.1,238.7L458.3,247.6L465.9,252.8L472.1,251.1L474.7,256.2L481.2,255.2L489.7,263.5L491.9,269.6L489.7,272.9L493.6,270.3L494.7,274.4L499.0,272.8L500.2,288.1L503.9,289.1L495.5,290.6L496.4,294.5L494.3,295.9L504.7,298.9L512.3,305.0L507.2,307.0L506.5,310.8L496.7,311.2L493.9,318.4L486.5,317.3L483.7,313.9L479.3,318.8L477.1,316.3L475.4,321.0L484.6,323.3L483.3,329.3L476.1,325.4L476.0,327.3L472.7,320.1L469.0,318.2L462.1,323.4L464.1,327.9L459.5,334.6L452.7,330.8L432.8,337.4L431.3,350.9L423.3,350.4L419.3,352.7L418.9,356.6L416.6,354.2L414.7,359.2L408.6,356.5L405.7,358.3L400.2,357.0L394.5,359.0L394.2,362.6L389.7,366.5L385.7,363.7L384.8,365.5L371.4,364.6L365.8,362.9L365.0,358.5L364.9,349.8L368.9,346.3L359.5,344.6L355.1,341.1L360.2,340.5L364.0,336.0L362.2,333.3L364.1,332.5L362.4,331.1L365.4,319.4L360.0,313.6L360.7,311.1L363.7,308.8L363.5,305.0L366.4,305.2L365.8,302.8L372.6,300.9L368.9,297.4L363.1,296.6L363.5,292.2L367.9,290.0L365.5,288.6L371.3,281.3L367.3,278.6L369.3,268.7Z","M471.2,448.4L470.7,461.2L461.4,458.3L463.2,460.3L460.3,461.2L459.0,465.8L451.2,468.4L453.5,470.3L452.2,471.7L449.2,468.2L445.2,469.7L443.6,466.5L439.7,465.9L437.6,467.7L440.1,467.9L439.8,472.5L434.8,475.8L432.0,473.2L429.2,479.2L422.8,476.5L420.0,476.8L420.5,478.8L418.8,476.1L412.0,477.3L408.4,480.3L409.8,482.7L405.9,492.0L403.3,490.3L402.4,495.0L392.2,492.3L394.2,485.6L398.2,482.4L402.4,485.3L400.3,482.2L406.8,473.3L407.1,468.8L399.0,466.7L400.0,456.5L391.9,457.4L390.9,453.8L387.9,454.3L388.9,445.5L386.4,444.2L382.7,446.9L384.0,441.8L381.7,443.8L377.8,442.2L378.2,445.2L373.6,450.4L371.1,448.6L363.6,452.7L362.7,446.3L355.9,446.1L355.1,443.8L353.8,445.5L353.2,443.0L351.0,445.7L352.7,449.5L345.9,450.1L347.7,442.7L343.4,438.8L345.2,437.1L342.0,433.3L347.0,432.9L347.1,437.5L351.8,440.0L358.4,438.8L361.4,444.5L362.9,441.0L358.8,438.8L361.5,435.2L359.6,434.8L365.9,432.6L361.7,426.5L361.1,432.0L357.1,426.4L351.4,426.4L349.9,431.3L343.7,430.2L341.6,424.2L345.1,420.6L341.0,421.0L337.0,415.9L341.0,402.5L337.1,401.0L337.5,396.9L349.2,399.8L352.6,393.1L350.9,390.9L352.5,389.3L348.5,386.9L345.1,380.1L347.2,379.9L347.2,374.6L351.0,373.4L347.9,370.8L347.4,365.6L355.6,361.4L377.0,365.0L384.8,365.5L385.7,363.7L389.7,366.5L394.2,362.6L394.5,359.0L400.2,357.0L405.7,358.3L408.6,356.5L414.7,359.2L416.6,354.2L418.9,356.6L419.3,352.7L423.3,350.4L431.3,350.9L432.8,337.4L452.7,330.8L460.0,334.3L464.1,327.9L462.1,323.4L469.0,318.2L472.7,320.1L476.0,327.3L476.1,325.4L483.3,329.3L484.6,323.3L475.4,321.0L477.1,316.3L479.3,318.8L483.7,313.9L486.5,317.3L493.9,318.4L496.7,311.2L506.5,310.8L507.2,307.0L512.3,305.0L504.7,298.9L494.3,295.9L497.1,289.5L502.1,290.7L506.2,285.7L515.0,288.2L523.6,287.1L539.5,277.2L548.5,280.2L552.6,274.0L550.2,271.8L553.3,268.1L551.2,266.9L552.2,263.1L556.8,258.0L558.9,263.8L562.2,265.6L560.6,267.4L562.8,270.5L563.0,267.9L568.0,266.4L569.1,262.0L574.4,265.5L578.8,264.8L577.5,261.7L580.3,258.1L577.2,254.1L582.0,248.5L584.9,250.7L592.3,246.3L588.6,240.0L594.4,241.8L594.7,236.2L597.3,239.5L600.8,233.5L605.7,242.9L607.2,239.2L611.0,247.4L616.6,247.3L618.6,249.7L628.4,247.9L627.9,244.7L632.0,243.1L631.3,239.1L633.4,240.4L637.2,237.0L638.2,239.0L640.9,236.9L638.0,234.7L642.4,233.6L643.8,238.2L620.1,267.5L600.0,278.5L584.9,296.4L561.1,308.7L550.6,317.7L547.9,322.8L547.9,325.0L552.0,325.9L550.8,320.4L552.2,321.6L552.4,331.7L550.4,337.6L527.6,347.7L518.6,345.8L511.6,347.8L508.1,351.7L505.5,361.0L499.9,366.7L500.2,369.8L497.5,371.3L497.1,371.1L493.0,371.6L492.4,366.4L491.2,365.3L487.6,364.6L477.9,367.8L472.3,372.5L463.2,396.8L468.9,416.5L466.3,434.0L471.2,448.4Z","M590.0,35.6L591.4,27.5L594.3,25.4L592.2,19.9L610.3,18.7L615.5,14.3L619.4,20.9L626.6,17.6L626.6,22.0L631.5,26.8L634.6,26.7L634.3,28.5L637.0,23.6L640.8,24.4L646.1,18.8L651.9,25.1L656.7,22.7L657.5,25.1L667.9,17.8L673.8,19.2L676.0,16.0L679.7,16.4L678.6,12.6L682.0,7.2L686.5,7.7L690.0,10.7L694.2,8.8L698.2,16.5L704.5,16.5L702.7,21.4L709.2,25.3L715.3,15.7L717.8,17.4L722.4,15.3L727.3,18.2L728.2,13.9L732.5,15.7L736.4,0.0L767.4,1.2L762.0,9.6L765.5,11.1L765.5,16.6L760.2,16.7L762.4,20.1L761.4,24.7L755.1,29.8L757.3,34.0L752.7,33.6L752.0,36.7L749.7,35.3L748.2,40.6L740.0,38.2L741.9,43.9L740.0,43.6L739.8,47.0L735.5,45.2L737.0,47.0L735.3,48.2L727.3,44.7L726.3,47.2L723.1,46.5L722.8,52.4L709.9,54.8L704.0,63.5L697.8,61.4L698.2,57.6L694.1,56.5L694.2,60.5L687.1,61.0L688.4,64.1L685.2,69.3L688.0,73.8L693.8,74.2L700.7,80.2L713.2,80.5L708.9,83.0L708.2,88.4L716.5,93.4L717.4,97.0L721.6,97.0L722.9,100.5L721.0,101.8L724.6,104.0L726.3,108.9L721.1,111.6L711.2,106.1L709.1,107.9L693.9,97.3L690.5,101.4L693.1,104.2L692.0,106.3L694.0,107.7L691.1,110.1L693.3,112.4L688.5,121.2L683.1,120.2L685.9,116.8L684.7,115.4L680.0,117.8L667.9,113.6L662.9,119.6L657.4,115.8L653.2,116.7L658.2,108.2L656.2,100.6L626.4,106.3L615.6,99.0L618.4,94.5L624.2,92.8L630.4,82.4L622.4,78.9L621.0,81.4L620.3,76.7L616.6,74.4L618.1,66.7L613.8,64.6L615.8,54.6L612.6,55.2L612.8,57.2L606.5,55.6L603.9,47.2L598.7,45.5L596.6,38.9L590.0,35.6Z","M235.0,373.7L238.7,368.7L241.7,370.3L244.8,368.6L243.7,365.8L246.3,365.8L248.5,358.3L244.6,357.8L249.3,356.4L250.2,352.3L246.6,348.7L243.2,349.1L244.7,343.8L240.2,340.1L241.1,338.1L245.3,338.9L248.7,333.4L252.6,337.8L257.1,335.7L257.3,331.4L266.1,329.1L266.5,322.2L272.6,321.9L277.4,326.3L279.9,321.7L287.1,320.5L288.0,322.2L291.2,319.6L294.9,321.5L294.4,309.5L291.2,304.7L293.5,300.9L299.6,305.2L303.2,303.3L304.9,307.1L312.2,305.2L314.4,308.0L316.9,304.8L322.3,307.4L320.3,296.1L326.4,293.6L327.7,289.6L330.0,291.8L331.3,289.2L334.2,292.8L338.0,286.9L336.1,284.0L342.9,283.4L344.2,272.5L350.3,273.8L355.4,263.5L360.1,261.9L362.0,264.3L360.1,267.7L369.3,268.7L369.0,276.5L367.1,277.8L371.3,281.3L365.5,288.6L367.9,290.0L363.5,292.2L363.1,296.6L372.7,300.0L365.8,302.8L366.4,305.2L363.5,305.0L363.7,308.8L360.7,311.1L360.0,313.6L365.4,319.4L362.4,331.1L364.1,332.5L362.2,333.3L364.0,336.0L360.2,340.5L355.1,341.1L359.5,344.6L368.9,346.2L369.0,348.3L364.9,349.8L365.8,362.9L353.2,361.7L347.4,365.6L347.9,370.8L351.0,373.4L347.2,374.6L347.2,379.9L345.1,380.1L348.5,386.9L352.5,389.3L350.9,390.9L352.6,393.1L349.2,399.8L337.5,396.9L337.1,401.0L341.0,402.5L337.0,415.9L341.0,421.0L345.1,420.6L341.6,424.2L343.7,430.2L350.2,431.2L352.1,426.3L357.1,426.4L361.1,432.0L361.2,426.6L365.4,429.4L365.4,433.7L359.6,434.8L361.5,435.2L358.8,438.8L362.9,441.0L361.4,444.5L358.4,438.8L351.8,440.0L347.1,437.5L347.0,432.9L342.0,433.3L345.2,437.1L343.4,438.8L347.7,442.7L346.0,450.2L352.7,449.5L351.0,445.7L353.2,443.0L353.8,445.5L355.1,443.8L355.9,446.1L362.7,446.3L363.6,452.7L366.2,452.4L366.3,449.8L372.2,448.5L373.6,450.4L378.2,445.2L377.8,442.2L381.7,443.8L383.4,441.6L382.7,446.9L386.4,444.2L389.3,446.2L387.9,454.3L390.9,453.8L391.9,457.4L400.0,456.5L399.0,466.7L407.1,468.8L406.8,473.3L400.3,482.2L402.4,483.8L402.4,485.3L398.2,482.4L393.4,489.6L386.6,485.8L381.4,486.9L381.8,484.4L378.2,485.2L374.5,493.1L369.1,493.3L369.8,505.3L364.2,511.7L374.0,512.7L375.9,515.5L372.0,521.9L365.1,522.3L362.5,529.6L355.7,527.5L350.3,529.1L350.6,531.2L345.4,527.5L342.1,528.9L340.5,536.0L331.2,535.7L327.3,531.8L323.6,533.1L323.5,529.6L320.7,530.4L314.9,525.1L312.2,526.0L311.9,520.8L302.2,521.6L300.0,516.8L294.6,516.1L287.8,508.4L285.1,508.5L283.2,501.7L285.2,500.1L282.1,501.4L279.7,498.5L281.7,496.3L277.6,497.3L275.0,492.7L270.9,493.3L269.3,488.3L264.6,489.8L263.3,488.2L254.2,445.3L250.5,440.5L240.8,411.2L234.3,407.8L234.0,404.0L240.4,401.6L242.1,398.4L242.9,392.6L240.4,389.7L243.6,388.2L240.3,373.7L235.0,373.7Z","M198.7,191.7L199.6,198.0L193.8,197.3L188.9,189.0L196.0,185.6L198.7,188.5L194.6,193.5L198.7,191.7Z","M486.5,146.9L481.7,144.2L477.3,144.9L475.9,139.1L471.1,135.0L457.2,139.3L451.3,135.8L443.7,138.3L442.0,133.0L431.8,131.1L431.6,134.1L419.7,136.4L420.5,140.6L401.9,140.1L399.4,135.4L391.5,137.7L391.3,140.0L382.2,144.6L368.6,145.5L366.5,143.2L364.8,145.0L362.4,138.5L369.6,138.5L367.0,131.8L364.5,129.2L357.2,129.6L354.1,132.4L348.9,131.2L342.3,136.1L338.2,136.2L337.8,141.4L331.5,146.7L333.1,149.0L331.6,152.6L326.5,152.3L325.1,155.7L318.3,157.2L314.0,156.8L311.9,153.8L314.4,152.6L311.3,145.2L280.7,144.6L265.4,134.8L252.0,132.7L250.1,131.0L250.9,123.6L247.8,119.1L238.6,123.0L234.5,120.1L237.6,116.6L233.5,111.2L233.2,105.8L238.0,107.2L241.9,104.2L238.0,101.0L235.3,103.2L231.8,99.7L236.5,99.1L240.8,94.2L245.3,94.6L249.0,85.8L243.8,81.9L243.0,77.6L259.2,71.7L250.5,66.9L253.9,61.7L266.7,54.9L265.4,45.1L268.5,39.0L265.4,35.6L265.2,30.9L259.4,29.9L263.5,22.2L258.0,20.5L262.0,14.0L260.4,13.5L261.5,8.8L264.9,14.7L269.8,10.7L263.4,9.0L262.8,1.6L270.5,6.2L273.6,4.9L275.3,0.0L281.2,0.0L281.4,4.2L279.2,1.5L279.3,5.0L285.5,5.2L281.1,8.0L277.8,6.2L277.6,11.9L301.3,10.9L300.9,15.5L304.3,17.1L304.1,21.8L301.4,23.4L299.5,21.1L297.1,24.4L301.1,30.7L298.0,34.3L301.3,37.7L296.7,41.3L289.2,39.0L286.8,42.7L295.6,49.8L296.3,44.0L298.9,46.1L305.2,44.1L306.2,39.3L312.5,36.5L314.7,26.8L315.8,31.6L325.7,31.0L327.9,33.7L334.3,28.6L334.5,33.3L342.2,34.9L344.0,32.0L340.0,27.1L339.0,18.7L342.9,18.3L345.2,21.6L348.8,17.1L347.2,11.5L340.5,10.3L338.5,7.6L344.1,5.2L340.7,0.0L397.4,0.0L391.0,5.5L395.1,13.5L393.2,19.2L398.7,25.0L397.2,26.9L399.6,29.5L404.4,24.5L410.2,30.4L413.8,29.6L414.9,32.9L418.4,31.3L422.7,23.1L419.7,21.6L421.9,20.2L418.5,14.3L413.4,16.0L414.9,7.6L409.3,0.0L494.3,0.0L492.7,3.2L497.8,1.3L498.2,3.3L503.1,2.0L505.2,4.5L506.3,1.8L508.3,2.9L508.0,0.0L534.7,0.0L536.2,6.3L542.8,8.6L546.1,7.2L545.1,10.7L548.0,9.2L547.1,12.7L550.0,13.3L549.8,15.8L554.3,16.4L554.8,11.9L568.1,14.3L569.1,16.8L566.0,17.9L565.7,24.8L568.0,26.2L566.9,33.4L563.9,34.9L568.1,37.0L567.2,39.5L569.5,41.5L563.7,43.7L562.7,46.5L558.4,48.7L535.2,45.2L531.2,47.7L525.6,43.0L523.3,43.9L526.6,51.1L522.0,56.6L524.0,60.7L528.6,57.2L535.4,58.7L537.7,63.4L545.8,67.0L544.5,74.3L536.1,76.8L536.2,81.7L529.7,85.0L529.4,93.4L526.1,94.1L523.8,98.5L519.9,98.4L515.5,102.4L512.4,99.0L504.1,102.5L504.4,108.3L500.6,111.2L500.1,117.5L496.9,115.2L493.1,121.7L493.6,128.0L489.3,131.5L489.8,141.1L486.5,146.9Z","M218.3,370.8L223.9,370.4L225.2,368.0L230.3,375.5L240.3,373.7L243.6,388.2L240.4,389.7L242.9,392.6L240.4,401.6L233.3,403.7L227.3,396.6L228.8,394.2L226.7,386.7L222.4,383.5L225.9,384.1L228.4,383.7L228.2,382.5L226.7,383.3L222.5,381.5L218.3,370.8Z","M290.0,532.1L276.9,519.7L264.1,489.6L269.3,488.3L270.9,493.3L275.0,492.7L277.6,497.3L281.7,496.3L279.7,498.5L282.1,501.4L285.2,500.1L283.2,501.7L285.1,508.5L287.8,508.4L294.6,516.1L300.0,516.8L302.2,521.6L311.9,520.8L312.2,526.0L314.9,525.1L320.7,530.4L323.5,529.6L324.7,534.3L316.6,537.2L317.1,541.3L328.7,545.6L325.2,552.5L335.8,551.3L334.5,553.9L338.4,557.8L334.5,558.9L332.9,562.8L342.5,568.7L341.5,574.4L338.8,575.0L339.5,587.9L345.4,591.2L355.1,585.9L357.4,591.3L356.3,595.1L353.8,595.7L356.5,601.4L352.4,615.5L359.9,615.9L361.9,619.6L356.9,627.9L356.4,633.9L351.7,639.1L356.0,645.0L352.6,650.3L357.0,658.1L353.8,660.0L352.7,667.2L349.8,668.3L345.3,664.7L328.5,643.5L320.7,623.6L316.9,600.7L311.5,584.7L297.9,547.3L290.0,532.1Z"]},"rain":{"n":1775451,"dry_share":0.5486797439073227,"p99":48.443647384643555,"max":431.61444091796875,"raw_edges":[0,5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,100],"raw_counts":[1441846,134570,70134,41018,25795,16616,11297,7810,5589,4258,3259,2396,1997,1525,1179,949,826,730,556,3101],"log_edges":[0.0,0.25,0.5,0.75,1.0,1.25,1.5,1.75,2.0,2.25,2.5,2.75,3.0,3.25,3.5,3.75,4.0,4.25,4.5,4.75,5.0],"log_counts":[1046131,79929,66104,61476,60474,59379,58565,57661,55412,51575,46082,38626,31073,22869,15606,10396,6493,3820,2138,1642]},"demo":{"gauge":8020,"start":"2024-08-12","issue":"2024-09-10","q":[12,12,10,8,7,7,7,8,7,7,7,6,6,6,9,12,10,7,5,5,4,0,0,0,0,4,14,13,10,26,341,369,62,23,15,13,12,12,10,9,8,7,6,10],"p":[32,89,31,134,26,6,48,44,13,26,20,61,93,6,2,7,8,6,62,18,3,4,4,13,60,34,25,56,156,5957,null,null,842,44,18,61,9,7,10,73,7,70,22,137],"y":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,null,null,0,0,0,0,0,0,0,0,0,0,0,0],"r":[3,1,0,7,6,2,4,2,0,2,6,11,16,6,2,2,0,0,4,2,1,6,7,1,12,11,3,2,18,127,9,1,0,0,0,0,1,1,0,0,1,8,7,10],"f":[8,23,17,30,6,7,23,21,26,16,10,23,15,3,1,23,18,32,42,32,18,3,5,28,37,23,25,42,20,24,13,10,19,4,22,12,2,2,18,26,7,18,11,29]}}</script>
+<script>
+(() => {
+const BASE = JSON.parse(document.getElementById('base-data').textContent);
+const NS = 'http://www.w3.org/2000/svg';
+const $ = id => document.getElementById(id);
+
+function S(tag, attrs, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs || {}) {
+    if (attrs[k] == null) continue;
+    if (k === 'text') e.textContent = attrs[k]; else e.setAttribute(k, attrs[k]);
+  }
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function newSvg(el, w, h, label) {
+  const s = S('svg', { viewBox: `0 0 ${w} ${h}`, role: 'img', 'aria-label': label });
+  el.appendChild(s);
+  return s;
+}
+const sc = (d0, d1, r0, r1) => v => r0 + (v - d0) * (r1 - r0) / (d1 - d0);
+function pathFrom(pts) {
+  let d = '', pen = false;
+  for (const p of pts) {
+    if (!p) { pen = false; continue; }
+    d += (pen ? 'L' : 'M') + p[0].toFixed(1) + ',' + p[1].toFixed(1);
+    pen = true;
+  }
+  return d;
+}
+const fmt = (v, d = 0) => v.toLocaleString('en-IN', { minimumFractionDigits: d, maximumFractionDigits: d });
+function pct(p) {
+  if (p == null) return '—';
+  if (p < 0.001) return '<0.1%';
+  if (p < 0.1) return (p * 100).toFixed(1) + '%';
+  return Math.round(p * 100) + '%';
+}
+const DAY = 86400000;
+const toD = s => new Date(s + 'T00:00:00Z');
+const isoD = d => d.toISOString().slice(0, 10);
+const addD = (s, n) => isoD(new Date(toD(s).getTime() + n * DAY));
+const diffD = (a, b) => Math.round((toD(b) - toD(a)) / DAY);
+const nice = s => toD(s).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
+const short = s => toD(s).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+
+/* tooltip */
+const tip = $('tip');
+function showTip(text, x, y) {
+  tip.textContent = text; tip.hidden = false;
+  const r = tip.getBoundingClientRect();
+  let left = x + 14, top = y + 14;
+  if (left + r.width > innerWidth - 8) left = x - r.width - 14;
+  if (top + r.height > innerHeight - 8) top = y - r.height - 14;
+  tip.style.left = Math.max(8, left) + 'px'; tip.style.top = Math.max(8, top) + 'px';
+}
+document.addEventListener('pointermove', e => {
+  if (e.target.closest && e.target.closest('[data-own-tip]')) return;
+  const t = e.target.closest && e.target.closest('[data-tip]');
+  if (!t) { tip.hidden = true; return; }
+  showTip(t.getAttribute('data-tip'), e.clientX, e.clientY);
+});
+document.addEventListener('pointerleave', () => { tip.hidden = true; });
+
+/* ------------------------------------------------------------------ figures */
+
+function strip(s, L, R, top, h, label) {
+  S('text', { x: 0, y: top + 11, class: 'tk', text: label }, s);
+}
+
+function figQuestion(el) {
+  const D = BASE.demo, n = D.q.length, W = 640, H = 420;
+  const s = newSvg(el, W, H, 'Kotni, Aug–Sep 2024: rain, river flow against its flood line, and AERIS forecasts');
+  const L = 62, R = W - 12, x = sc(0, n - 1, L, R), bw = (R - L) / n * 0.7;
+  const t = diffD(D.start, D.issue);
+  const rT = 14, rH = 64, fT = 110, fH = 190, pT = 336, pH = 64;
+  // window shading t+1..t+2
+  S('rect', { x: x(t + 0.5), y: fT - 6, width: x(t + 2.5) - x(t + 0.5), height: pT + pH - fT + 6, fill: 'var(--flood-soft)', class: 'fadein' }, s);
+  // rain
+  const yr = sc(0, 130, rT + rH, rT);
+  S('text', { x: 0, y: rT + 10, class: 'tk', text: 'Rain, mm' }, s);
+  S('line', { x1: L, x2: R, y1: rT + rH, y2: rT + rH, class: 'grid' }, s);
+  S('text', { x: L - 6, y: yr(100) + 4, class: 'tk', 'text-anchor': 'end', text: '100' }, s);
+  S('line', { x1: L, x2: R, y1: yr(100), y2: yr(100), class: 'grid', 'stroke-dasharray': '2 4' }, s);
+  D.r.forEach((v, i) => {
+    if (v == null) return;
+    S('rect', { x: x(i) - bw / 2, y: yr(v), width: bw, height: Math.max(0.5, yr(0) - yr(v)), rx: 1, class: 'rainbar', 'data-tip': `${short(addD(D.start, i))}: ${v} mm of rain` }, s);
+  });
+  // flow
+  const yq = sc(0, 400, fT + fH, fT);
+  S('text', { x: 0, y: fT + 10, class: 'tk', text: 'River, % of' }, s);
+  S('text', { x: 0, y: fT + 24, class: 'tk', text: 'flood flow' }, s);
+  [0, 200, 300].forEach(v => {
+    S('line', { x1: L, x2: R, y1: yq(v), y2: yq(v), class: 'grid' }, s);
+    S('text', { x: L - 6, y: yq(v) + 4, class: 'tk', 'text-anchor': 'end', text: v + '%' }, s);
+  });
+  S('line', { x1: L, x2: R, y1: yq(100), y2: yq(100), class: 'floodline' }, s);
+  S('text', { x: L - 6, y: yq(100) + 4, class: 'tk', 'text-anchor': 'end', text: '100%', fill: 'var(--flood)' }, s);
+  S('text', { x: L + 6, y: yq(100) - 7, class: 'mono', 'font-size': 11.5, fill: 'var(--flood)', text: 'Flood line: the 2-year flood flow' }, s);
+  S('path', { d: pathFrom(D.q.map((v, i) => v == null ? null : [x(i), yq(Math.min(v, 400))])), class: 'flowline draw', pathLength: 1 }, s);
+  D.q.forEach((v, i) => { if (v != null) S('circle', { cx: x(i), cy: yq(Math.min(v, 400)), r: 7, class: 'hit', 'data-tip': `${short(addD(D.start, i))}: river at ${v}% of flood flow` }, s); });
+  const peak = D.q.reduce((b, v, i) => (v != null && v > D.q[b] ? i : b), 0);
+  S('circle', { cx: x(peak), cy: yq(D.q[peak]), r: 4.5, fill: 'var(--flood)', class: 'fadein' }, s);
+  S('text', { x: x(peak) + 8, y: yq(D.q[peak]) + 4, class: 'mono strong fadein', 'font-size': 12, text: `${D.q[peak]}% on ${short(addD(D.start, peak))}` }, s);
+  // probability
+  const yp = sc(0, 100, pT + pH, pT);
+  S('text', { x: 0, y: pT + 10, class: 'tk', text: 'AERIS chance' }, s);
+  S('text', { x: 0, y: pT + 24, class: 'tk', text: 'of crossing' }, s);
+  S('line', { x1: L, x2: R, y1: yp(0), y2: yp(0), class: 'grid' }, s);
+  S('line', { x1: L, x2: R, y1: yp(100), y2: yp(100), class: 'grid', 'stroke-dasharray': '2 4' }, s);
+  S('text', { x: L - 6, y: yp(100) + 4, class: 'tk', 'text-anchor': 'end', text: '100%' }, s);
+  D.p.forEach((v, i) => {
+    if (v == null) return;
+    const pp = v / 100;
+    S('rect', { x: x(i) - bw / 2, y: yp(pp), width: bw, height: Math.max(0.8, yp(0) - yp(pp)), rx: 1, class: 'pbar', 'data-tip': `Forecast issued ${short(addD(D.start, i))}: ${pct(v / 10000)}` }, s);
+  });
+  // issue day
+  S('line', { x1: x(t), x2: x(t), y1: rT - 6, y2: pT + pH + 4, stroke: 'var(--ink)', 'stroke-width': 1.5, 'stroke-dasharray': '4 3' }, s);
+  S('text', { x: x(t) - 6, y: fT + 34, class: 'strong', 'text-anchor': 'end', 'font-size': 12.5, text: 'Issue day t' }, s);
+  S('text', { x: x(t) - 6, y: fT + 50, 'text-anchor': 'end', 'font-size': 12, text: nice(D.issue) }, s);
+  S('text', { x: x(t + 2.5) + 6, y: fT + 34, 'font-size': 12, class: 'fadein', text: 'Window: t+1, t+2' }, s);
+  S('text', { x: x(t) - 8, y: yp(D.p[t] / 100) + 12, 'text-anchor': 'end', class: 'mono strong fadein', 'font-size': 14, text: pct(D.p[t] / 10000) }, s);
+  // x ticks
+  ['2024-08-15', '2024-09-01', '2024-09-15'].forEach(d => {
+    const i = diffD(D.start, d);
+    S('text', { x: x(i), y: H - 2, class: 'tk', 'text-anchor': 'middle', text: short(d) }, s);
+  });
+}
+
+function drawStates(s) {
+  BASE.map.paths.forEach(d => S('path', { d, class: 'state' }, s));
+}
+
+function figWhere(el) {
+  const M = BASE.map;
+  const s = newSvg(el, M.w, M.h, 'Map of the 190 gauges in Peninsular India');
+  s.classList.add('mapsvg');
+  drawStates(s);
+  BASE.gauges.filter(g => g.core).forEach(g => {
+    const tipText = `${g.site}\n${g.river}\n${g.basin}${g.role === 'holdout' ? ' · held out' : ''}`;
+    if (g.role === 'holdout') {
+      S('rect', { x: g.x - 5.5, y: g.y - 5.5, width: 11, height: 11, transform: `rotate(45 ${g.x} ${g.y})`, class: 'hold', 'data-tip': tipText }, s);
+    } else {
+      S('circle', { cx: g.x, cy: g.y, r: 5.5, class: 'dev', 'data-tip': tipText }, s);
+    }
+  });
+  const areas = BASE.gauges.filter(g => g.core && g.area).map(g => g.area);
+  $('area-range').textContent = `${fmt(Math.min(...areas))}–${fmt(Math.max(...areas))} km²`;
+}
+
+function figInfo(el) {
+  const W = 640, H = 330;
+  const s = newSvg(el, W, H, 'What a forecast on day t can see');
+  const L = 190, xT = 470, x1 = 515, x2 = 560, x3 = 605;
+  const rows = [
+    ['Rain that fell', 'IMD', 'past'],
+    ['Weather, soil', 'ERA5-Land (G2 only)', 'past-late'],
+    ['River reading', 'CWC gauges', 'past'],
+    ['Forecast rain', 'GEFS, run of t−1', 'fc'],
+    ['Catchment facts', '46 fixed numbers', 'fixed'],
+    ['To predict', 'crosses flood line?', 'target'],
+  ];
+  const y0 = 46, gap = 44;
+  S('text', { x: L, y: 18, class: 'tk', text: '← 180 days of history' }, s);
+  [[xT, 't'], [x1, 't+1'], [x2, 't+2'], [x3, 't+3']].forEach(([xx, lab]) => S('text', { x: xx, y: 18, class: 'tk', 'text-anchor': 'middle', text: lab }, s));
+  rows.forEach(([name, src, kind], i) => {
+    const y = y0 + i * gap;
+    S('text', { x: 0, y: y + 4, class: 'strong', 'font-size': 13, text: name }, s);
+    S('text', { x: 0, y: y + 19, 'font-size': 11.5, text: src }, s);
+    if (kind === 'past' || kind === 'past-late') {
+      S('rect', { x: L, y: y - 8, width: xT + 20 - L, height: 16, rx: 4, fill: kind === 'past' ? 'var(--accent)' : 'var(--accent-soft)', stroke: 'var(--accent)', 'stroke-width': 1, 'data-tip': kind === 'past' ? `${name}: every day up to and including t` : 'ERA5-Land arrives 5 days to 3 months late, so the live version (G2-nolate) does without it' }, s);
+    } else if (kind === 'fc') {
+      S('circle', { cx: xT - 45, cy: y, r: 5, fill: 'var(--model)' }, s);
+      S('text', { x: xT - 55, y: y + 4, 'text-anchor': 'end', 'font-size': 11.5, text: 'issued t−1' }, s);
+      S('line', { x1: xT - 40, x2: x1 - 22, y1: y, y2: y, stroke: 'var(--model)', 'stroke-width': 1.5, 'stroke-dasharray': '3 3' }, s);
+      S('rect', { x: x1 - 20, y: y - 8, width: x3 - x1 + 40, height: 16, rx: 4, fill: 'var(--model)', opacity: .85, 'data-tip': 'Forecast rain for days t+1 to t+3, from the GEFS run of the day before' }, s);
+    } else if (kind === 'fixed') {
+      S('line', { x1: L, x2: x3 + 20, y1: y, y2: y, stroke: 'var(--ink-3)', 'stroke-width': 2, 'stroke-dasharray': '1 5', 'stroke-linecap': 'round' }, s);
+    } else {
+      S('rect', { x: x1 - 20, y: y - 10, width: x2 - x1 + 40, height: 20, rx: 4, fill: 'var(--flood-soft)', stroke: 'var(--flood)', 'stroke-width': 1.5, 'data-tip': 'The question: does the river cross its flood line on day t+1 or t+2?' }, s);
+      S('text', { x: (x1 + x2) / 2, y: y + 4, 'text-anchor': 'middle', class: 'mono', 'font-size': 11, fill: 'var(--flood)', text: 'onset?' }, s);
+    }
+  });
+  S('line', { x1: xT + 22, x2: xT + 22, y1: 26, y2: H - 8, stroke: 'var(--ink)', 'stroke-width': 1.5, 'stroke-dasharray': '5 4' }, s);
+  S('text', { x: xT + 26, y: H - 10, 'font-size': 11.5, class: 'strong', text: 'issue: evening of t' }, s);
+}
+
+function hbars(el, rows, opt) {
+  const W = 640, rowH = opt.rowH || 40, L = opt.L || 250, R = W - 60;
+  const H = rows.length * rowH + 30;
+  const s = newSvg(el, W, H, opt.label);
+  const x = sc(0, opt.max, L, R);
+  (opt.ticks || []).forEach(v => {
+    S('line', { x1: x(v), x2: x(v), y1: 4, y2: H - 22, class: 'grid' }, s);
+    S('text', { x: x(v), y: H - 6, class: 'tk', 'text-anchor': 'middle', text: v.toFixed(2) }, s);
+  });
+  rows.forEach((r, i) => {
+    const y = 8 + i * rowH, bh = Math.min(20, rowH - 14);
+    S('text', { x: L - 12, y: y + bh / 2 + (r.sub ? -2 : 4), 'text-anchor': 'end', class: r.hl ? 'strong' : '', 'font-size': 13, text: r.name }, s);
+    if (r.sub) S('text', { x: L - 12, y: y + bh / 2 + 12, 'text-anchor': 'end', 'font-size': 11, fill: 'var(--ink-3)', text: r.sub }, s);
+    const w = Math.max(2, x(r.v) - x(0));
+    S('rect', { x: x(0), y, width: w, height: bh, rx: 3, fill: r.color || 'var(--ink-3)', opacity: r.ghost ? .35 : 1, 'stroke-dasharray': r.ghost ? '4 3' : null, stroke: r.ghost ? r.color : 'none', 'data-tip': `${r.name}${r.sub ? ' (' + r.sub + ')' : ''}: ${r.v.toFixed(3)}` }, s);
+    S('text', { x: x(0) + w + 6, y: y + bh / 2 + 4, class: 'mono' + (r.hl ? ' strong' : ''), 'font-size': 12, text: r.v.toFixed(3) }, s);
+  });
+  S('line', { x1: x(0), x2: x(0), y1: 4, y2: H - 22, class: 'axis' }, s);
+  return s;
+}
+
+function figLadder(el) {
+  hbars(el, [
+    { name: 'Calendar only', sub: 'R0, usual chance by date', v: 0.004 },
+    { name: 'Weather, soil, catchment', sub: 'L0, no river reading', v: 0.046, color: 'var(--compare)' },
+    { name: '+ today\'s river reading', sub: 'L1', v: 0.076, color: 'var(--compare)' },
+    { name: '+ forecast rain', sub: 'L2', v: 0.090, color: 'var(--compare)' },
+    { name: 'Same inputs, GRU network', sub: 'G2, the headline model', v: 0.117, color: 'var(--model)', hl: true },
+    { name: 'Rain that really fell', sub: 'oracle, impossible live', v: 0.241, color: 'var(--compare)', ghost: true },
+  ], { max: 0.26, ticks: [0, 0.05, 0.1, 0.15, 0.2, 0.25], label: 'Validation skill as inputs are added', rowH: 46 });
+}
+
+function hist(el, edges, counts, opt) {
+  const W = 300, H = 210, L = 38, R = W - 8, T = 22, B = H - 34;
+  const s = newSvg(el, W, H, opt.label);
+  const tot = counts.reduce((a, b) => a + b, 0), share = counts.map(c => c / tot * 100);
+  const x = sc(edges[0], edges[edges.length - 1], L, R), y = sc(0, opt.ymax, B, T);
+  S('text', { x: L, y: 12, class: 'strong', 'font-size': 12.5, text: opt.title }, s);
+  [0, opt.ymax / 2, opt.ymax].forEach(v => {
+    S('line', { x1: L, x2: R, y1: y(v), y2: y(v), class: 'grid' }, s);
+    S('text', { x: L - 5, y: y(v) + 4, class: 'tk', 'text-anchor': 'end', text: v + '%' }, s);
+  });
+  share.forEach((v, i) => {
+    const x0 = x(edges[i]) + 1, x1 = x(edges[i + 1]) - 1, h = Math.max(0.6, B - y(Math.min(v, opt.ymax)));
+    S('rect', { x: x0, y: B - h, width: Math.max(1, x1 - x0), height: h, rx: 1.5, fill: 'var(--model)', 'data-tip': `${opt.binLabel(edges[i], edges[i + 1])}: ${v.toFixed(2)}% of days` }, s);
+    if (v > opt.ymax) S('text', { x: (x0 + x1) / 2 + 4, y: T + 10, class: 'tk', text: `↑ ${v.toFixed(0)}%` }, s);
+  });
+  opt.xt.forEach(([v, lab]) => S('text', { x: x(v), y: B + 16, class: 'tk', 'text-anchor': 'middle', text: lab }, s));
+  S('text', { x: (L + R) / 2, y: H - 2, class: 'tk', 'text-anchor': 'middle', text: opt.xlab }, s);
+}
+
+function figRain() {
+  const R = BASE.rain;
+  hist($('fig-rain-raw'), R.raw_edges, R.raw_counts, { label: 'Histogram of daily rain in millimetres', title: 'Rain, mm', ymax: 20, xlab: 'mm per day (100+ in last bar)', xt: [[0, '0'], [25, '25'], [50, '50'], [75, '75'], [100, '100']], binLabel: (a, b) => `${a}–${b} mm` });
+  hist($('fig-rain-log'), R.log_edges, R.log_counts, { label: 'Histogram of log(1 + rain)', title: 'log(1 + rain)', ymax: 20, xlab: 'log(1 + mm)', xt: [[0, '0'], [Math.log1p(1), '1 mm'], [Math.log1p(10), '10'], [Math.log1p(100), '100']], binLabel: (a, b) => `${(Math.expm1(a)).toFixed(1)}–${(Math.expm1(b)).toFixed(1)} mm` });
+  $('dry-share').textContent = Math.round(R.dry_share * 100) + '%';
+  $('p99').textContent = Math.round(R.p99) + ' mm';
+  $('rmax').textContent = Math.round(R.max) + ' mm';
+  $('rain-cap').textContent = `Daily catchment rain on ${fmt(R.n)} training days. Left: millimetres. Right: the same days after log(1 + mm). Bars taller than 20% are cut and labelled. Heavy days are rare but decide floods; the log scale stops them swamping everything else.`;
+}
+
+function figSplit(el) {
+  const W = 680, H = 210, L = 20, R = W - 20;
+  const s = newSvg(el, W, H, 'Timeline of training, validation and test years');
+  // training years drawn shorter: 1980-2015 gets 200 px, 2015-2026 the rest
+  const x = v => v <= 2015 ? L + (v - 1980) / 35 * 200 : L + 200 + (v - 2015) / 11 * (R - L - 200);
+  const blocks = [
+    [1980, 2015, 'Training 1980–2014', 'var(--accent-soft)', 'var(--ink)'],
+    [2016, 2019, 'Validation 2016–18', 'var(--model)', 'var(--card)'],
+    [2021, 2024.58, 'Sealed test', 'var(--flood)', 'var(--card)'],
+    [2024.58, 2026, 'Fresh', 'var(--compare)', 'var(--card)'],
+  ];
+  const yB = 60, hB = 34;
+  blocks.forEach(([a, b, lab, fill, ink]) => {
+    S('rect', { x: x(a) + 1, y: yB, width: x(b) - x(a) - 2, height: hB, rx: 4, fill, 'data-tip': lab }, s);
+    S('text', { x: (x(a) + x(b)) / 2, y: yB + 21, 'text-anchor': 'middle', 'font-size': 12, fill: ink, 'font-weight': 700, text: lab }, s);
+  });
+  S('rect', { x: x(2000) + 1, y: yB + hB - 8, width: x(2015) - x(2000) - 2, height: 8, rx: 2, fill: 'var(--accent)', 'data-tip': 'Models with forecast rain train on 2000–2014, the years with GEFS reforecasts' }, s);
+  S('text', { x: x(2000), y: yB - 8, class: 'tk', text: 'forecast-rain models from 2000' }, s);
+  [[2015, 'gap'], [2019, 'gap'], [2020, 'bridge']].forEach(([yr, lab]) => {
+    S('rect', { x: x(yr) + 1, y: yB, width: x(yr + 1) - x(yr) - 2, height: hB, rx: 3, fill: 'none', stroke: 'var(--ink-3)', 'stroke-dasharray': '3 3', 'data-tip': lab === 'gap' ? `${yr}: left out so neighbouring days cannot leak across` : '2020: used only for data checks' }, s);
+    S('text', { x: x(yr + 0.5), y: yB + hB + 14, 'text-anchor': 'middle', class: 'tk', text: lab }, s);
+  });
+  S('text', { x: x(2022.8), y: yB - 8, class: 'tk', 'text-anchor': 'middle', text: '2021–Jul 2024' }, s);
+  // basins row
+  const y2 = 140;
+  S('text', { x: L, y: y2 - 8, class: 'tk', text: '13 development basins' }, s);
+  S('rect', { x: x(1980), y: y2, width: x(2026) - x(1980), height: 10, rx: 3, fill: 'var(--accent)', opacity: .8 }, s);
+  S('text', { x: L, y: y2 + 34, class: 'tk', text: '2 held-out basins (Krishna, east-flowing south)' }, s);
+  S('rect', { x: x(2021) + 1, y: y2 + 42, width: x(2026) - x(2021) - 2, height: 10, rx: 3, fill: 'var(--compare)', 'data-tip': 'Held-out basins appear only in the two tests' }, s);
+  S('line', { x1: x(1980), x2: x(2021), y1: y2 + 47, y2: y2 + 47, stroke: 'var(--ink-3)', 'stroke-dasharray': '1 5', 'stroke-linecap': 'round', 'stroke-width': 2 }, s);
+  [1980, 2000, 2015, 2020, 2025].forEach(v => S('text', { x: x(v), y: 20, class: 'tk', 'text-anchor': 'middle', text: v }, s));
+  S('text', { x: x(1997.5), y: 34, class: 'tk', 'text-anchor': 'middle', text: '(1980–2014 drawn shorter)' }, s);
+}
+
+function figBakeoff(el) {
+  const N = 'var(--model)', T = 'var(--compare)', P = 'var(--ink-3)';
+  hbars(el, [
+    { name: 'GRU', v: 0.172, color: N, hl: true }, { name: 'LSTM', v: 0.167, color: N },
+    { name: 'LightGBM', v: 0.160, color: T }, { name: 'CatBoost', v: 0.159, color: T },
+    { name: 'TCN (convolution)', v: 0.159, color: N }, { name: 'XGBoost', v: 0.158, color: T },
+    { name: 'Histogram boosting', v: 0.155, color: T }, { name: 'Transformer', v: 0.147, color: N },
+    { name: 'Random forest', v: 0.131, color: T }, { name: 'Logistic regression', v: 0.130, color: P },
+    { name: 'Extra Trees', v: 0.120, color: T }, { name: 'SVM', v: 0.108, color: P },
+    { name: 'Decision tree', v: 0.094, color: P },
+  ], { max: 0.2, ticks: [0, 0.05, 0.1, 0.15, 0.2], L: 170, rowH: 27, label: 'AERIS v1 comparison of 13 model types' });
+}
+
+const ARCH = {
+  join1: ['Join', '15 + 16 = 31 per day', 'Each day’s 15 readings are placed side by side with the 16 embedding numbers, so the GRU reads 31 numbers per day.'],
+  daily: ['Daily readings', '180 days × 15 channels', 'For each of the last 180 days: rain, weather, soil moisture, river flow and a missing-reading flag, each scaled as in step 5. G2-nolate reads 4 channels: rain twice (log, and ÷ 99th percentile), river flow and the flag.'],
+  vec: ['Catchment and forecast', '54 numbers', '46 fixed catchment facts, 2 calendar numbers (sine and cosine of the day of year) and 6 forecast-rain numbers: GEFS rain for the next 3 days, on a log scale and ÷ the catchment\'s 99th-percentile day.'],
+  emb: ['Embedding', '54 → 16, tanh', 'A small layer that squeezes the 54 numbers into 16, bounded by tanh. The same 16 numbers are attached to every one of the 180 days, so the GRU always knows which kind of catchment it is reading. 880 weights.'],
+  gru: ['GRU layer', '64 memory units', 'Reads the 180 days in order, oldest first. Each day it updates 64 memory numbers using the gates of step 9. Each day\'s input is 31 numbers: 15 readings and the 16 from the embedding. 18,624 weights.'],
+  last: ['Last memory', '64 numbers', 'The memory after day 180, the issue day. It is the network\'s own summary of the past half year. No weights: it is just the GRU\'s final state.'],
+  join: ['Join', '64 + 54 = 118', 'The memory is joined with the 54 catchment and forecast numbers again, so the last layers can use the coming rain directly.'],
+  dense: ['Dense layer', '64 units, ReLU', 'Every one of the 118 numbers feeds every one of 64 units, followed by ReLU. Dropout could switch off units at random during training; the search chose none. 7,616 weights.'],
+  out: ['Output', '1 number → sigmoid', 'One unit gives a score; sigmoid turns it into a probability between 0 and 1. Its bias started at −5.3, the log-odds of the 0.48% base rate. 65 weights.'],
+};
+function figArch(el) {
+  const W = 600, H = 560, bw = 210, bh = 54;
+  const s = newSvg(el, W, H, 'GRU network architecture: daily readings and catchment facts in, one probability out');
+  S('defs', {}, s).innerHTML = '<marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker>';
+  s.style.color = 'var(--ink-3)';
+  const A = 30, B = 360, pos = {
+    daily: [A, 10, ''], vec: [B, 10, ''], emb: [B, 110, '880'], gru: [A, 200, '18,624'],
+    last: [A, 300, ''], dense: [A, 440, '7,616'], out: [B, 440, '65'],
+  };
+  const line = (pts, label, lx, ly, anchor) => {
+    S('path', { d: 'M' + pts.map(p => p.join(',')).join('L'), class: 'arrow', 'marker-end': 'url(#ah)' }, s);
+    if (label) S('text', { x: lx, y: ly, 'font-size': 11.5, 'text-anchor': anchor || 'start', fill: 'var(--ink-3)', text: label }, s);
+  };
+  const cA = A + bw / 2, cB = B + bw / 2;
+  line([[cA, 64], [cA, 117]]);
+  line([[cB, 64], [cB, 108]]);
+  line([[B, 137], [cA + 16, 137]], 'copied to all 180 days', (cA + 16 + B) / 2, 128, 'middle');
+  line([[cA, 153], [cA, 198]]);
+  line([[cA, 254], [cA, 298]]);
+  line([[cA, 354], [cA, 380]]);
+  line([[B + bw, 37], [W - 6, 37], [W - 6, 395], [cA + 16, 395]], '54 numbers again', W - 12, 386, 'end');
+  line([[cA, 411], [cA, 438]]);
+  line([[A + bw, 467], [B - 2, 467]]);
+  line([[cB, 494], [cB, 530]]);
+  S('text', { x: cB, y: 548, 'text-anchor': 'middle', class: 'strong', 'font-size': 13, text: 'Chance of flood onset, next 2 days' }, s);
+  // join nodes
+  [[cA, 137, 'Join: 31 per day'], [cA, 395, 'join']].forEach(([cx, cy, t], i) => {
+    const g = S('g', { 'data-key': i === 0 ? 'join1' : 'join', class: 'archnode', style: 'cursor:pointer' }, s);
+    S('circle', { cx, cy, r: 16, class: 'box' + (i === 1 ? ' joinbox' : '') }, g);
+    S('text', { x: cx, y: cy + 5, 'text-anchor': 'middle', class: 'strong', 'font-size': 16, text: '+' }, g);
+    if (i === 0) S('text', { x: cx - 24, y: cy + 4, 'text-anchor': 'end', 'font-size': 11.5, fill: 'var(--ink-3)', text: '31 / day' }, s);
+    else S('text', { x: cx - 24, y: cy + 4, 'text-anchor': 'end', 'font-size': 11.5, fill: 'var(--ink-3)', text: '118' }, s);
+  });
+  for (const k in pos) {
+    const [x, y, w] = pos[k];
+    const g = S('g', { 'data-key': k, class: 'archnode', style: 'cursor:pointer', tabindex: 0, role: 'button', 'aria-label': ARCH[k][0] }, s);
+    S('rect', { x, y, width: bw, height: bh, rx: 8, class: 'box' }, g);
+    S('text', { x: x + 12, y: y + 22, class: 'strong', 'font-size': 14, text: ARCH[k][0] }, g);
+    S('text', { x: x + 12, y: y + 40, 'font-size': 12.5, text: ARCH[k][1] }, g);
+    if (w) S('text', { x: x + bw - 10, y: y + 22, 'text-anchor': 'end', class: 'mono', 'font-size': 11.5, fill: 'var(--accent)', text: w }, g);
+  }
+  const info = $('archinfo');
+  function select(k) {
+    s.querySelectorAll('.archnode').forEach(g => g.querySelector('rect, circle').classList.toggle('sel', g.dataset.key === k));
+    info.innerHTML = '';
+    const h = document.createElement('h4'); h.textContent = ARCH[k][0] + ' · ' + ARCH[k][1];
+    const p = document.createElement('p'); p.textContent = ARCH[k][2];
+    info.append(h, p);
+  }
+  s.addEventListener('click', e => { const g = e.target.closest('.archnode'); if (g) select(g.dataset.key); });
+  s.addEventListener('keydown', e => { const g = e.target.closest('.archnode'); if (g && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); select(g.dataset.key); } });
+  select('gru');
+}
+
+function figToy(el) {
+  const D = BASE.demo, n = D.r.length, W = 640, H = 300;
+  const sig = v => 1 / (1 + Math.exp(-v));
+  const xs = D.r.map(v => Math.log1p(v || 0) / Math.log1p(150));
+  let h = 0; const H_ = [], Z = [], N_ = [];
+  xs.forEach(xv => {
+    const r = sig(0.5 + 1.0 * h), z = sig(2.5 - 4 * xv);
+    const nn = Math.tanh(3.0 * xv + 1.6 * r * h - 0.3);
+    h = (1 - z) * nn + z * h;
+    H_.push(h); Z.push(z); N_.push(nn);
+  });
+  const s = newSvg(el, W, H, 'Toy GRU memory unit responding to real rain');
+  const L = 70, R = W - 10, x = sc(0, n - 1, L, R), bw = (R - L) / n * 0.7;
+  const rT = 8, rH = 60, hT = 100, hH = 100, zT = 230, zH = 50;
+  const yr = sc(0, 130, rT + rH, rT), yh = sc(-0.3, 1, hT + hH, hT), yz = sc(0, 1, zT + zH, zT);
+  S('text', { x: 0, y: rT + 12, class: 'tk', text: 'Rain, mm' }, s);
+  S('text', { x: 0, y: hT + 12, class: 'tk', text: 'Memory h' }, s);
+  S('text', { x: 0, y: zT + 12, class: 'tk', text: 'Keep gate z' }, s);
+  S('line', { x1: L, x2: R, y1: yh(0), y2: yh(0), class: 'grid' }, s);
+  S('line', { x1: L, x2: R, y1: yz(0), y2: yz(0), class: 'grid' }, s);
+  S('line', { x1: L, x2: R, y1: yz(1), y2: yz(1), class: 'grid', 'stroke-dasharray': '2 4' }, s);
+  S('text', { x: L - 5, y: yz(1) + 4, class: 'tk', 'text-anchor': 'end', text: '1' }, s);
+  S('text', { x: L - 5, y: yz(0) + 4, class: 'tk', 'text-anchor': 'end', text: '0' }, s);
+  const rainG = S('g', {}, s), hP = S('path', { class: 'flowline' }, s), zP = S('path', { fill: 'none', stroke: 'var(--compare)', 'stroke-width': 2 }, s);
+  const cur = S('line', { y1: rT, y2: zT + zH, stroke: 'var(--ink)', 'stroke-dasharray': '3 3' }, s);
+  D.r.forEach((v, i) => S('rect', { x: x(i) - bw / 2, y: yr(v || 0), width: bw, height: Math.max(0.5, yr(0) - yr(v || 0)), rx: 1, class: 'rainbar', 'data-tip': `${short(addD(D.start, i))}: ${v ?? 0} mm` }, rainG));
+  const read = $('toy-read');
+  function upto(k) {
+    hP.setAttribute('d', pathFrom(H_.slice(0, k + 1).map((v, i) => [x(i), yh(v)])));
+    zP.setAttribute('d', pathFrom(Z.slice(0, k + 1).map((v, i) => [x(i), yz(v)])));
+    cur.setAttribute('x1', x(k)); cur.setAttribute('x2', x(k));
+    [...rainG.children].forEach((r, i) => r.setAttribute('opacity', i <= k ? 1 : 0.25));
+    read.textContent = `${short(addD(D.start, k))}: rain ${D.r[k] ?? 0} mm · keep gate ${Z[k].toFixed(2)} · candidate ${N_[k].toFixed(2)} · memory ${H_[k].toFixed(2)}`;
+  }
+  upto(n - 1);
+  let timer = null;
+  $('toy-play').addEventListener('click', () => {
+    clearInterval(timer);
+    let k = 0; upto(0);
+    timer = setInterval(() => { k++; if (k >= n) { clearInterval(timer); return; } upto(k); }, 140);
+  });
+}
+
+function figAct(el) {
+  const W = 640, H = 300, L = 40, R = W - 10, T = 10, B = H - 26;
+  const s = newSvg(el, W, H, 'Sigmoid, tanh and ReLU activation functions');
+  const x = sc(-5, 5, L, R), y = sc(-1.25, 2.5, B, T);
+  const fns = [
+    ['Sigmoid', v => 1 / (1 + Math.exp(-v)), v => { const q = 1 / (1 + Math.exp(-v)); return q * (1 - q); }, 'var(--model)'],
+    ['tanh', Math.tanh, v => 1 - Math.tanh(v) ** 2, 'var(--compare)'],
+    ['ReLU', v => Math.max(0, v), v => (v > 0 ? 1 : 0), 'var(--third)'],
+  ];
+  [-1, 0, 1, 2].forEach(v => {
+    S('line', { x1: L, x2: R, y1: y(v), y2: y(v), class: v === 0 ? 'axis' : 'grid' }, s);
+    S('text', { x: L - 6, y: y(v) + 4, class: 'tk', 'text-anchor': 'end', text: v }, s);
+  });
+  [-4, -2, 0, 2, 4].forEach(v => S('text', { x: x(v), y: H - 6, class: 'tk', 'text-anchor': 'middle', text: v }, s));
+  S('line', { x1: x(0), x2: x(0), y1: T, y2: B, class: 'axis' }, s);
+  const clip = S('clipPath', { id: 'actclip' }, S('defs', {}, s));
+  S('rect', { x: L, y: T, width: R - L, height: B - T }, clip);
+  const g = S('g', { 'clip-path': 'url(#actclip)' }, s);
+  const dots = fns.map(([, f, , c]) => {
+    const pts = []; for (let v = -5; v <= 5.001; v += 0.05) pts.push([x(v), y(f(v))]);
+    S('path', { d: pathFrom(pts), fill: 'none', stroke: c, 'stroke-width': 2.4 }, g);
+    return S('circle', { r: 6, fill: c, stroke: 'var(--card)', 'stroke-width': 2 }, s);
+  });
+  const vline = S('line', { y1: T, y2: B, stroke: 'var(--ink)', 'stroke-dasharray': '3 3' }, s);
+  const inp = $('act-x'), read = $('act-read');
+  function upd() {
+    const v = +inp.value; $('act-xv').textContent = v.toFixed(1);
+    vline.setAttribute('x1', x(v)); vline.setAttribute('x2', x(v));
+    read.innerHTML = '';
+    fns.forEach(([name, f, df], i) => {
+      const yy = Math.min(2.5, f(v));
+      dots[i].setAttribute('cx', x(v)); dots[i].setAttribute('cy', y(yy));
+      const d = document.createElement('div');
+      const b = document.createElement('b'); b.textContent = f(v).toFixed(3);
+      d.append(b, `${name} · slope ${df(v).toFixed(3)}`);
+      read.appendChild(d);
+    });
+  }
+  inp.addEventListener('input', upd); upd();
+}
+
+function figLoss(el) {
+  const W = 640, H = 280, L = 40, R = W - 10, T = 10, B = H - 30;
+  const s = newSvg(el, W, H, 'Log loss as a function of the forecast probability');
+  const x = sc(0, 1, L, R), y = sc(0, 5, B, T);
+  [0, 1, 2, 3, 4, 5].forEach(v => {
+    S('line', { x1: L, x2: R, y1: y(v), y2: y(v), class: v === 0 ? 'axis' : 'grid' }, s);
+    S('text', { x: L - 6, y: y(v) + 4, class: 'tk', 'text-anchor': 'end', text: v }, s);
+  });
+  [0, 0.25, 0.5, 0.75, 1].forEach(v => S('text', { x: x(v), y: H - 12, class: 'tk', 'text-anchor': 'middle', text: Math.round(v * 100) + '%' }, s));
+  S('text', { x: (L + R) / 2, y: H, class: 'tk', 'text-anchor': 'middle', text: 'forecast probability' }, s);
+  const p1 = [], p0 = [];
+  for (let p = 0.005; p <= 0.995; p += 0.005) { p1.push([x(p), y(Math.min(5, -Math.log(p)))]); p0.push([x(p), y(Math.min(5, -Math.log(1 - p)))]); }
+  S('path', { d: pathFrom(p1), fill: 'none', stroke: 'var(--flood)', 'stroke-width': 2.4 }, s);
+  S('path', { d: pathFrom(p0), fill: 'none', stroke: 'var(--model)', 'stroke-width': 2.4 }, s);
+  const d1 = S('circle', { r: 6, fill: 'var(--flood)', stroke: 'var(--card)', 'stroke-width': 2 }, s);
+  const d0 = S('circle', { r: 6, fill: 'var(--model)', stroke: 'var(--card)', 'stroke-width': 2 }, s);
+  const vl = S('line', { y1: T, y2: B, stroke: 'var(--ink)', 'stroke-dasharray': '3 3' }, s);
+  const base = 0.0048;
+  S('line', { x1: x(base), x2: x(base), y1: T, y2: B, stroke: 'var(--ink-3)', 'stroke-width': 1 }, s);
+  S('text', { x: x(base) + 5, y: T + 12, class: 'tk', text: 'base rate 0.48%' }, s);
+  const inp = $('loss-p'), read = $('loss-read');
+  function upd() {
+    const p = +inp.value; $('loss-pv').textContent = Math.round(p * 100) + '%';
+    vl.setAttribute('x1', x(p)); vl.setAttribute('x2', x(p));
+    d1.setAttribute('cx', x(p)); d1.setAttribute('cy', y(Math.min(5, -Math.log(p))));
+    d0.setAttribute('cx', x(p)); d0.setAttribute('cy', y(Math.min(5, -Math.log(1 - p))));
+    read.innerHTML = '';
+    [[(-Math.log(p)).toFixed(2), 'log loss if a flood follows'], [(-Math.log(1 - p)).toFixed(2), 'log loss if none follows'],
+     [((1 - p) ** 2).toFixed(3), 'Brier if a flood follows'], [(p ** 2).toFixed(3), 'Brier if none follows']].forEach(([v, t]) => {
+      const d = document.createElement('div'); const b = document.createElement('b'); b.textContent = v; d.append(b, t); read.appendChild(d);
+    });
+  }
+  inp.addEventListener('input', upd); upd();
+}
+
+const HIST = [
+  { seed: 0, kept: 9000, tl: [0.019858, 0.017006, 0.016664, 0.016876, 0.016369, 0.016135, 0.016069, 0.015567, 0.015469, 0.015414, 0.015066, 0.01493], vb: [0.0031782, 0.0030366, 0.0030316, 0.0029638, 0.0029656, 0.0029352, 0.0029137, 0.002919, 0.0028594, 0.0029487, 0.0029992, 0.0029723] },
+  { seed: 1, kept: 6000, tl: [0.019868, 0.017335, 0.01664, 0.016797, 0.016266, 0.015919, 0.01581, 0.015504, 0.015189, 0.015249], vb: [0.0030934, 0.0029752, 0.0029777, 0.0029631, 0.002962, 0.0029156, 0.0030244, 0.0029914, 0.0029817, 0.0029896] },
+  { seed: 2, kept: 5000, tl: [0.019543, 0.017266, 0.016802, 0.016621, 0.015785, 0.015889, 0.015643, 0.015613, 0.015014], vb: [0.0030346, 0.0030271, 0.0029728, 0.0029737, 0.0029347, 0.0029454, 0.0029362, 0.0030509, 0.0029778] },
+];
+const SEEDC = ['var(--model)', 'var(--compare)', 'var(--third)'];
+function lineChart(el, key, opt) {
+  const W = 300, H = 210, L = 48, R = W - 8, T = 24, B = H - 30;
+  const s = newSvg(el, W, H, opt.label);
+  const x = sc(1000, 12000, L, R), y = sc(opt.y0, opt.y1, B, T);
+  S('text', { x: 0, y: 13, class: 'strong', 'font-size': 12.5, text: opt.title }, s);
+  opt.ticks.forEach(v => {
+    S('line', { x1: L, x2: R, y1: y(v), y2: y(v), class: 'grid' }, s);
+    S('text', { x: L - 5, y: y(v) + 4, class: 'tk', 'text-anchor': 'end', text: opt.tf(v) }, s);
+  });
+  [2000, 6000, 10000].forEach(v => S('text', { x: x(v), y: B + 16, class: 'tk', 'text-anchor': 'middle', text: fmt(v) }, s));
+  S('text', { x: (L + R) / 2, y: H - 1, class: 'tk', 'text-anchor': 'middle', text: 'training step' }, s);
+  HIST.forEach((h, k) => {
+    const v = h[key];
+    S('path', { d: pathFrom(v.map((u, i) => [x((i + 1) * 1000), y(u)])), fill: 'none', stroke: SEEDC[k], 'stroke-width': 2 }, s);
+    v.forEach((u, i) => S('circle', { cx: x((i + 1) * 1000), cy: y(u), r: 3, fill: SEEDC[k], 'data-tip': `Seed ${h.seed}, step ${fmt((i + 1) * 1000)}: ${opt.tf(u, true)}` }, s));
+    if (key === 'vb') { const i = h.kept / 1000 - 1; S('circle', { cx: x(h.kept), cy: y(v[i]), r: 7.5, fill: 'none', stroke: 'var(--ink)', 'stroke-width': 2, 'data-tip': `Seed ${h.seed}: kept the version from step ${fmt(h.kept)}` }, s); }
+  });
+}
+function figTrain() {
+  lineChart($('fig-trainloss'), 'tl', { title: 'Training loss (log loss)', label: 'Training loss falls with each step', y0: 0.0145, y1: 0.0205, ticks: [0.015, 0.0175, 0.02], tf: (v, full) => full ? v.toFixed(5) : v.toFixed(4) });
+  lineChart($('fig-valbrier'), 'vb', { title: 'Validation Brier score', label: 'Validation score reaches its best then worsens', y0: 0.00284, y1: 0.0032, ticks: [0.0029, 0.003, 0.0031, 0.0032], tf: (v, full) => full ? v.toFixed(6) : v.toFixed(4) });
+}
+
+const TRIALS = [[365, 128, 0.2, 0.001, 0.002985, 196], [365, 128, 0.2, 0.0003, 0.002924, 294], [90, 64, 0.0, 0.0003, 0.002863, 62], [90, 256, 0.2, 0.003, 0.003026, 154], [180, 128, 0.4, 0.003, 0.003038, 69], [180, 128, 0.2, 0.003, 0.003039, 111], [90, 256, 0.4, 0.0003, 0.00293, 190], [180, 256, 0.2, 0.0003, 0.002956, 265], [365, 256, 0.4, 0.0003, 0.002943, 712], [90, 256, 0.0, 0.001, 0.002988, 132], [90, 64, 0.2, 0.001, 0.002942, 44], [180, 64, 0.0, 0.0003, 0.002859, 98]];
+function figTune(el) {
+  const rows = TRIALS.map((t, i) => ({ t, i })).sort((a, b) => a.t[4] - b.t[4]);
+  const W = 640, rowH = 27, L = 290, R = W - 56, T = 8;
+  const H = rows.length * rowH + 40;
+  const s = newSvg(el, W, H, 'Twelve settings tried and their validation Brier scores');
+  const x = sc(0.00284, 0.00306, L, R);
+  [0.00285, 0.0029, 0.00295, 0.003, 0.00305].forEach(v => {
+    S('line', { x1: x(v), x2: x(v), y1: T, y2: H - 28, class: 'grid' }, s);
+    S('text', { x: x(v), y: H - 12, class: 'tk', 'text-anchor': 'middle', text: (v * 1000).toFixed(2) }, s);
+  });
+  S('text', { x: (L + R) / 2, y: H, class: 'tk', 'text-anchor': 'middle', text: 'validation Brier score × 1,000 (lower is better)' }, s);
+  rows.forEach(({ t, i }, k) => {
+    const y = T + k * rowH + 12, best = k === 0;
+    const lab = `${t[0]} d · ${t[1]} units · drop ${t[2]} · lr ${t[3]}`;
+    S('text', { x: L - 14, y: y + 4, 'text-anchor': 'end', class: 'mono' + (best ? ' strong' : ''), 'font-size': 11, text: lab }, s);
+    S('line', { x1: L, x2: x(t[4]), y1: y, y2: y, stroke: 'var(--rule)', 'stroke-width': 1 }, s);
+    S('circle', { cx: x(t[4]), cy: y, r: best ? 7 : 5.5, fill: best ? 'var(--model)' : 'var(--ink-3)', 'data-tip': `${lab}\nBrier ${t[4].toFixed(6)} · ${t[5]} s to train${i === 0 ? '\n(the starting setting)' : ''}` }, s);
+    if (best) S('text', { x: x(t[4]) + 12, y: y + 4, class: 'strong', 'font-size': 12, text: 'kept' }, s);
+    if (i === 0) S('text', { x: x(t[4]) + 10, y: y + 4, 'font-size': 11, fill: 'var(--ink-3)', text: 'start' }, s);
+  });
+}
+
+const RELI = [[0.0, 107329, 0.002, 0.002], [0.1, 474, 0.14, 0.118], [0.2, 129, 0.24, 0.248], [0.3, 59, 0.344, 0.288], [0.4, 28, 0.44, 0.393], [0.5, 20, 0.562, 0.55], [0.6, 9, 0.651, 0.667], [0.7, 3, 0.768, 0.333], [0.8, 2, 0.816, 1.0]];
+function figReli(el) {
+  const W = 420, H = 380, L = 48, R = W - 14, T = 10, B = H - 40;
+  const s = newSvg(el, W, H, 'Reliability diagram for G2 on the validation years');
+  const x = sc(0, 1, L, R), y = sc(0, 1, B, T);
+  [0, 0.25, 0.5, 0.75, 1].forEach(v => {
+    S('line', { x1: L, x2: R, y1: y(v), y2: y(v), class: 'grid' }, s);
+    S('line', { x1: x(v), x2: x(v), y1: T, y2: B, class: 'grid' }, s);
+    S('text', { x: L - 6, y: y(v) + 4, class: 'tk', 'text-anchor': 'end', text: Math.round(v * 100) + '%' }, s);
+    S('text', { x: x(v), y: B + 16, class: 'tk', 'text-anchor': 'middle', text: Math.round(v * 100) + '%' }, s);
+  });
+  S('text', { x: (L + R) / 2, y: H - 6, class: 'tk', 'text-anchor': 'middle', text: 'forecast probability' }, s);
+  S('text', { x: 12, y: (T + B) / 2, class: 'tk', 'text-anchor': 'middle', transform: `rotate(-90 12 ${(T + B) / 2})`, text: 'how often a flood followed' }, s);
+  S('line', { x1: x(0), y1: y(0), x2: x(1), y2: y(1), stroke: 'var(--ink-3)', 'stroke-dasharray': '5 4' }, s);
+  const ang = Math.atan2(y(1) - y(0), x(1) - x(0)) * 180 / Math.PI;
+  S('text', { x: x(0.8), y: y(0.8) - 8, class: 'tk', 'text-anchor': 'middle', transform: `rotate(${ang.toFixed(1)} ${x(0.8)} ${y(0.8) - 8})`, text: 'perfectly honest' }, s);
+  RELI.forEach(([lo, n, f, o]) => {
+    const few = n < 10, r = Math.min(13, 4 + Math.sqrt(n) / 2.2);
+    S('circle', { cx: x(f), cy: y(o), r, fill: few ? 'var(--card)' : 'var(--model)', stroke: 'var(--model)', 'stroke-width': 2, 'fill-opacity': few ? 1 : 0.85, 'data-tip': `Forecasts ${Math.round(lo * 100)}–${Math.round(lo * 100 + 10)}%: ${fmt(n)} days\naverage forecast ${(f * 100).toFixed(1)}%, floods followed ${(o * 100).toFixed(1)}%` }, s);
+  });
+  S('text', { x: x(0.002) + 16, y: y(0.002) - 8, 'font-size': 11.5, fill: 'var(--ink-2)', text: '107,329 days under 10%' }, s);
+}
+
+function figResults(el) {
+  const rows = [
+    { g: 'Same basins, 2021–Jul 2024 (90 gauges)' },
+    { name: 'GloFAS, as agencies receive it', v: 0.016, lo: -0.005, hi: 0.032, c: 'var(--ink-3)' },
+    { name: 'Google flood model (to Jun 2023)', v: 0.065, lo: -0.183, hi: 0.823, c: 'var(--ink-3)' },
+    { name: 'Persistence (R1a)', v: 0.087, lo: 0.023, hi: 0.134, c: 'var(--ink-3)' },
+    { name: 'Logistic + forecast rain (R2)', v: 0.164, lo: 0.111, hi: 0.197, c: 'var(--ink-3)' },
+    { name: 'LightGBM + forecast rain (L2)', v: 0.209, lo: 0.148, hi: 0.244, c: 'var(--compare)' },
+    { name: 'GRU + forecast rain (G2)', v: 0.210, lo: 0.143, hi: 0.252, c: 'var(--model)', hl: true },
+    { g: 'Unseen basins (26 gauges)' },
+    { name: 'GRU (G2)', v: 0.166, lo: -0.024, hi: 0.356, c: 'var(--model)' },
+    { g: 'Fresh test, Aug 2024–Dec 2025, CWC flow' },
+    { name: 'G2-nolate, same basins', v: 0.139, lo: 0.074, hi: 0.188, c: 'var(--model)' },
+    { name: 'G2-nolate, unseen basins', v: 0.140, lo: -0.077, hi: 0.229, c: 'var(--model)' },
+  ];
+  const W = 640, L = 250, R = W - 40, rowH = 28;
+  const H = rows.length * rowH + 34;
+  const s = newSvg(el, W, H, 'Test results with 95% intervals');
+  const lo = -0.2, hi = 0.4, x = sc(lo, hi, L, R);
+  [-0.2, -0.1, 0, 0.1, 0.2, 0.3, 0.4].forEach(v => {
+    S('line', { x1: x(v), x2: x(v), y1: 4, y2: H - 26, class: v === 0 ? 'axis' : 'grid' }, s);
+    S('text', { x: x(v), y: H - 10, class: 'tk', 'text-anchor': 'middle', text: v.toFixed(1) }, s);
+  });
+  rows.forEach((r, i) => {
+    const y = 14 + i * rowH;
+    if (r.g) { S('text', { x: 0, y: y + 4, class: 'mono', 'font-size': 11, fill: 'var(--accent)', 'font-weight': 600, text: r.g.toUpperCase() }, s); return; }
+    S('text', { x: L - 12, y: y + 4, 'text-anchor': 'end', class: r.hl ? 'strong' : '', 'font-size': 12.5, text: r.name }, s);
+    const a = x(Math.max(lo, r.lo)), b = x(Math.min(hi, r.hi));
+    S('line', { x1: a, x2: b, y1: y, y2: y, stroke: r.c, 'stroke-width': 3, 'stroke-linecap': 'round' }, s);
+    if (r.hi > hi) S('text', { x: b + 4, y: y + 4, class: 'tk', text: `→ ${r.hi.toFixed(2)}` }, s);
+    S('circle', { cx: x(r.v), cy: y, r: r.hl ? 7 : 5.5, fill: r.c, stroke: 'var(--card)', 'stroke-width': 2, 'data-tip': `${r.name}: ${r.v >= 0 ? '+' : ''}${r.v.toFixed(3)}\n95% interval ${r.lo.toFixed(3)} to ${r.hi.toFixed(3)}` }, s);
+  });
+}
+
+/* ------------------------------------------------------------------ stage navigation */
+const stages = [...document.querySelectorAll('.stage')];
+const rail = $('rail'), drop = $('drop');
+let cur = 0;
+const nodes = [];
+(function buildRail() {
+  let act = null, ol = null;
+  stages.forEach((st, i) => {
+    if (st.dataset.act !== act) {
+      act = st.dataset.act;
+      const box = document.createElement('div'); box.className = 'act';
+      const lab = document.createElement('div'); lab.className = 'act-label'; lab.textContent = act;
+      ol = document.createElement('ol'); box.append(lab, ol); rail.appendChild(box);
+    }
+    const li = document.createElement('li');
+    const b = document.createElement('button'); b.type = 'button'; b.className = 'node';
+    b.setAttribute('aria-label', `Step ${i + 1}: ${st.dataset.short}`);
+    const n = document.createElement('span'); n.className = 'n'; n.textContent = i + 1;
+    const l = document.createElement('span'); l.className = 'l'; l.textContent = st.dataset.short;
+    b.append(n, l); b.addEventListener('click', () => go(i)); li.appendChild(b); ol.appendChild(li);
+    nodes.push(li);
+  });
+})();
+function placeDrop() {
+  const b = nodes[cur].querySelector('.n'), rr = rail.getBoundingClientRect(), br = b.getBoundingClientRect();
+  drop.style.left = (br.left - rr.left + br.width / 2) + 'px';
+}
+function go(i, opts = {}) {
+  i = Math.max(0, Math.min(stages.length - 1, i));
+  const old = cur, back = i < old;
+  stages[old].hidden = true;
+  const st = stages[i];
+  st.hidden = false;
+  st.classList.remove('enter', 'back', 'play');
+  if (!opts.still && i !== old) {
+    void st.offsetWidth;
+    st.classList.add('enter', 'play');
+    if (back) st.classList.add('back');
+    window.scrollTo(0, 0);
+  }
+  cur = i;
+  nodes.forEach((li, k) => { li.classList.toggle('done', k < i); li.classList.toggle('here', k === i); const nb = li.querySelector('button'); if (k === i) nb.setAttribute('aria-current', 'step'); else nb.removeAttribute('aria-current'); });
+  placeDrop();
+  nodes[i].scrollIntoView({ block: 'nearest', inline: 'center', behavior: opts.still ? 'auto' : 'smooth' });
+  $('count').textContent = `${i + 1} / ${stages.length}`;
+  $('back').disabled = i === 0;
+  $('next').textContent = i === stages.length - 1 ? 'Try the forecast →' : `Next: ${stages[i + 1].dataset.short.replace('&amp;', '&')} →`;
+}
+$('back').addEventListener('click', () => go(cur - 1));
+$('next').addEventListener('click', () => { if (cur === stages.length - 1) location.hash = 'try'; else go(cur + 1); });
+document.addEventListener('keydown', e => {
+  if ($('view-how').hidden) return;
+  if (e.target.matches && e.target.matches('input, textarea, select, [contenteditable]')) return;
+  if (e.key === 'ArrowRight' || e.key === 'PageDown') { e.preventDefault(); if (cur < stages.length - 1) go(cur + 1); }
+  else if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); go(cur - 1); }
+});
+addEventListener('resize', placeDrop);
+
+/* ------------------------------------------------------------------ views */
+function route() {
+  const tryView = location.hash === '#try';
+  $('view-how').hidden = tryView; $('view-try').hidden = !tryView; $('controls').hidden = tryView;
+  if (tryView) { $('tab-try').setAttribute('aria-current', 'page'); $('tab-how').removeAttribute('aria-current'); initTry(); }
+  else { $('tab-how').setAttribute('aria-current', 'page'); $('tab-try').removeAttribute('aria-current'); requestAnimationFrame(placeDrop); }
+  window.scrollTo(0, 0);
+}
+addEventListener('hashchange', route);
+
+/* ------------------------------------------------------------------ try view */
+const GAUGES = new Map(BASE.gauges.map(g => [String(g.id), g]));
+let SER = null, tryStarted = false;
+const T = { period: 'val', gid: '15024', date: '2018-08-13', reveal: false };
+const PRESETS = [
+  { label: 'Kerala floods', sub: '13 Aug 2018', period: 'val', gid: '15024', date: '2018-08-13' },
+  { label: 'Mahanadi', sub: '27 Aug 2018', period: 'val', gid: '8029', date: '2018-08-27' },
+  { label: 'A false alarm', sub: 'Konta, 21 Jul 2018', period: 'val', gid: '3045', date: '2018-07-21' },
+  { label: 'Mahanadi, unseen year', sub: '10 Sep 2024', period: 'fresh', gid: '8020', date: '2024-09-10' },
+  { label: 'Krishna, unseen basin', sub: '18 Aug 2025', period: 'fresh', gid: '4007', date: '2025-08-18' },
+  { label: 'A miss', sub: 'T.Narasipur, 18 Aug 2025', period: 'fresh', gid: '5028', date: '2025-08-18' },
+];
+function initTry() {
+  if (tryStarted) return;
+  tryStarted = true;
+  const pr = $('presets');
+  PRESETS.forEach(p => {
+    const b = document.createElement('button'); b.type = 'button';
+    b.append(p.label); const sm = document.createElement('small'); sm.textContent = p.sub; b.appendChild(sm);
+    b.addEventListener('click', () => { Object.assign(T, { period: p.period, gid: p.gid, date: p.date }); render(true); });
+    pr.appendChild(b);
+  });
+  fetch('series.json').then(r => { if (!r.ok) throw new Error(r.status); return r.json(); }).then(j => {
+    SER = j.periods; buildTry(); render(true);
+  }).catch(() => { $('try-loading').textContent = 'The forecast file could not be loaded. Reload the page to try again.'; });
+}
+const per = () => SER[T.period];
+const series = (gid = T.gid) => per().series[gid];
+function at(s, date) { const i = diffD(s.start, date); return i >= 0 && i < s.p.length ? i : -1; }
+function periodRange() {
+  let a = null, b = null;
+  for (const k in per().series) { const s = per().series[k]; const e = addD(s.start, s.p.length - 1); if (!a || s.start < a) a = s.start; if (!b || e > b) b = e; }
+  if (T.period === 'fresh' && a < '2024-08-01') a = '2024-08-01';
+  return [a, b];
+}
+
+let mapSvg, chartBox, cardBox;
+function buildTry() {
+  const body = $('try-body'); body.innerHTML = '';
+  const grid = document.createElement('div'); grid.className = 'try-grid';
+  const mapP = document.createElement('figure'); mapP.className = 'panel'; mapP.style.margin = '0';
+  const mh = document.createElement('div'); mapP.appendChild(mh);
+  mapSvg = newSvg(mh, BASE.map.w, BASE.map.h, 'Map of forecasts at every gauge on the chosen day');
+  mapSvg.classList.add('mapsvg'); drawStates(mapSvg);
+  mapSvg.appendChild(S('g', { id: 'dots' }));
+  const lg = document.createElement('div'); lg.className = 'legend';
+  lg.innerHTML = '<span><i style="background:var(--flood)"></i>At or above the alert level</span><span><i style="background:var(--ink-3);opacity:.55"></i>No elevated signal</span><span><i style="border:2px solid var(--accent)"></i>Already above the flood line</span><span id="lg-ring" hidden><i style="border:2px solid var(--ink)"></i>Flood onset followed</span>';
+  const mc = document.createElement('figcaption'); mc.id = 'map-cap';
+  mapP.append(lg, mc);
+  cardBox = document.createElement('section'); cardBox.className = 'panel'; cardBox.setAttribute('aria-live', 'polite');
+  grid.append(mapP, cardBox);
+  chartBox = document.createElement('figure'); chartBox.className = 'panel series-fig'; chartBox.style.margin = '18px 0 0';
+  body.append(grid, chartBox);
+
+  $('period-seg').addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    T.period = b.dataset.period;
+    if (!series()) T.gid = T.period === 'val' ? '15024' : '8020';
+    const [a, z] = periodRange(); if (T.date < a || T.date > z) T.date = T.period === 'val' ? '2018-08-13' : '2024-09-10';
+    render(true);
+  });
+  $('prev-day').addEventListener('click', () => { T.date = addD(T.date, -1); clampDate(); render(); });
+  $('next-day').addEventListener('click', () => { T.date = addD(T.date, 1); clampDate(); render(); });
+  $('day').addEventListener('change', e => { if (e.target.value) { T.date = e.target.value; clampDate(); render(); } });
+  $('reveal').addEventListener('change', e => { T.reveal = e.target.checked; render(); });
+  mapSvg.addEventListener('click', e => { const d = e.target.closest('[data-gid]'); if (d) { T.gid = d.dataset.gid; render(); } });
+  setupSearch();
+}
+function clampDate() { const [a, b] = periodRange(); if (T.date < a) T.date = a; if (T.date > b) T.date = b; }
+
+function level(s, i) {
+  if (i < 0) return { kind: 'na' };
+  const p = s.p[i], q = s.q[i];
+  if (p == null) return { kind: q != null && q >= 100 ? 'in' : 'na' };
+  return { kind: p / 10000 >= per().alert ? 'a' : 'q', p: p / 10000 };
+}
+
+function render(recenter) {
+  $('period-seg').querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.period === T.period)));
+  const [a, b] = periodRange();
+  const di = $('day'); di.min = a; di.max = b; di.value = T.date;
+  $('reveal').checked = T.reveal;
+  $('lg-ring').hidden = !T.reveal;
+  // map
+  const dots = mapSvg.querySelector('#dots'); dots.innerHTML = '';
+  let nA = 0, nF = 0, nHit = 0;
+  const sel = GAUGES.get(T.gid);
+  for (const gid in per().series) {
+    const g = GAUGES.get(gid); if (!g) continue;
+    const s = series(gid), i = at(s, T.date), lv = level(s, i);
+    const r = lv.kind === 'a' ? 7.5 : lv.kind === 'q' ? 4.5 : lv.kind === 'in' ? 5.5 : 3;
+    if (lv.kind === 'a') nA++;
+    const y = i >= 0 ? s.y[i] : null;
+    if (y === 1) { nF++; if (lv.kind === 'a') nHit++; }
+    const text = `${g.site} · ${g.river}\n${lv.kind === 'a' || lv.kind === 'q' ? 'Forecast ' + pct(lv.p) : lv.kind === 'in' ? 'Already above the flood line' : 'No forecast'}${T.reveal && y != null ? (y === 1 ? '\nFlood onset followed' : '\nNo flood onset') : ''}`;
+    S('circle', { cx: g.x, cy: g.y, r, class: 'gdot ' + lv.kind, 'data-gid': gid, 'data-tip': text }, dots);
+    if (T.reveal && y === 1) S('circle', { cx: g.x, cy: g.y, r: r + 4, class: 'ring' }, dots);
+  }
+  if (sel) S('circle', { cx: sel.x, cy: sel.y, r: 13, class: 'selring' }, dots);
+  $('map-cap').textContent = `${nice(T.date)}: ${nA} gauge${nA === 1 ? '' : 's'} at or above the alert level (${pct(per().alert)}).` + (T.reveal ? ` ${nF} flood onset${nF === 1 ? '' : 's'} followed; ${nHit} of them had an alert.` : ' Tick "Show what happened" to see the outcome.');
+  renderCard();
+  renderChart();
+}
+
+function renderCard() {
+  const g = GAUGES.get(T.gid), s = series(), i = at(s, T.date), lv = level(s, i);
+  const P = per();
+  cardBox.innerHTML = '';
+  const add = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; cardBox.appendChild(e); return e; };
+  add('p', 'card-when', `Issued evening of ${nice(T.date)} · for ${short(addD(T.date, 1))} and ${short(addD(T.date, 2))}`);
+  add('p', 'card-site', g.site);
+  add('p', 'card-meta', `${g.river} · ${g.basin}${g.area ? ' · ' + fmt(g.area) + ' km²' : ''} · ${g.role === 'holdout' ? 'basin never used in training' : 'basin used in training'}`);
+  const big = add('div', 'bigp');
+  const bb = document.createElement('b');
+  const of = document.createElement('span'); of.className = 'of';
+  if (lv.kind === 'a' || lv.kind === 'q') { bb.textContent = pct(lv.p); of.textContent = `chance the river crosses its flood line within 2 days (${P.model})`; }
+  else { bb.textContent = '—'; of.textContent = lv.kind === 'in' ? 'The river was already above its flood line, so there is no onset forecast for this day.' : 'No forecast for this day: an input was missing.'; }
+  big.append(bb, of);
+  if (lv.kind === 'a') add('p', 'level alert', `Alert level reached (${pct(P.alert)} or more)`);
+  else if (lv.kind === 'q') add('p', 'level quiet', 'No elevated signal. This is not an all-clear.');
+  const kv = add('div', 'kv');
+  const item = (val, lab) => { const d = document.createElement('div'); const b = document.createElement('b'); b.textContent = val; d.append(b, lab); kv.appendChild(d); };
+  if (i >= 0) {
+    if (s.c[i] != null) item(pct(s.c[i] / 10000), 'usual chance on this date');
+    item(s.r[i] != null ? s.r[i] + ' mm' : '—', 'rain on the day');
+    item(s.f[i] != null ? s.f[i] + ' mm' : '—', 'forecast rain, next 2 days');
+    item(s.q[i] != null ? s.q[i] + '%' : 'no reading', 'river, % of flood flow');
+    if (s.b && s.b[i] != null) item(pct(s.b[i] / 10000), 'simple method (R2)');
+  }
+  const out = add('div', 'outcome');
+  if (!T.reveal) { out.classList.add('hidden'); out.textContent = 'What happened next is hidden. Tick "Show what happened".'; }
+  else if (i < 0 || s.y[i] == null) { out.textContent = lv.kind === 'in' ? 'The river was in flood on the issue day.' : 'No verified outcome for this day.'; }
+  else {
+    const nx = [s.q[i + 1], s.q[i + 2]].filter(v => v != null);
+    const peak = nx.length ? Math.max(...nx) : null;
+    if (s.y[i] === 1) { out.classList.add('yes'); out.textContent = `Flood onset followed. The river reached ${peak != null ? peak + '% of its flood flow' : 'its flood line'} within 2 days.${lv.kind === 'q' ? ' AERIS missed it.' : ''}`; }
+    else out.textContent = `No flood onset. The river peaked at ${peak != null ? peak + '%' : '—'} of its flood flow over the next 2 days.${lv.kind === 'a' ? ' This alert was a false alarm.' : ''}`;
+  }
+}
+
+function renderChart() {
+  const s = series(), P = per();
+  chartBox.innerHTML = '';
+  const n = s.p.length, ci = at(s, T.date);
+  let i0 = Math.max(0, ci - 30), i1 = Math.min(n - 1, i0 + 60); i0 = Math.max(0, i1 - 60);
+  const W = 900, H = 380, L = 128, R = W - 14;
+  const svgEl = newSvg(chartBox, W, H, 'Rain, river flow and forecasts around the chosen day');
+  svgEl.setAttribute('data-own-tip', '');
+  const x = sc(i0, i1, L, R), bw = (R - L) / (i1 - i0 + 1) * 0.68;
+  const vis = k => T.reveal || k <= ci;
+  const rT = 22, rH = 60, fT = 112, fH = 120, pT = 262, pH = 90;
+  const rr = [], qq = [], pp = [];
+  // scale on the visible days only, so a hidden future flood does not show through the axes
+  for (let k = i0; k <= i1; k++) { if (!vis(k)) continue; if (s.r[k] != null) rr.push(s.r[k]); if (s.q[k] != null) qq.push(s.q[k]); if (s.p[k] != null) pp.push(s.p[k] / 10000); }
+  const rMax = Math.max(50, ...rr), qMax = Math.max(150, ...qq) * 1.05, pMax = Math.max(0.2, Math.ceil(Math.max(0, ...pp) * 10) / 10);
+  const yr = sc(0, rMax, rT + rH, rT), yq = sc(0, qMax, fT + fH, fT), yp = sc(0, pMax, pT + pH, pT);
+  S('text', { x: 0, y: 12, class: 'strong', 'font-size': 13, text: `${GAUGES.get(T.gid).site}: the 61 days around ${nice(T.date)}` }, svgEl);
+  if (!T.reveal && ci < i1) {
+    S('rect', { x: x(ci + 0.5), y: rT - 4, width: R - x(ci + 0.5), height: pT + pH - rT + 4, fill: 'var(--sunk)', opacity: .7 }, svgEl);
+    S('text', { x: (x(ci + 0.5) + R) / 2, y: fT + fH / 2, 'text-anchor': 'middle', fill: 'var(--ink-3)', 'font-size': 13, text: 'not yet known on the issue day' }, svgEl);
+  }
+  // labels
+  [['Rain, mm', rT], ['River, % of', fT], ['Forecast', pT]].forEach(([t, y]) => S('text', { x: 0, y: y + 12, class: 'tk', text: t }, svgEl));
+  S('text', { x: 0, y: fT + 26, class: 'tk', text: 'flood flow' }, svgEl);
+  S('text', { x: 0, y: pT + 26, class: 'tk', text: 'chance' }, svgEl);
+  // rain
+  S('line', { x1: L, x2: R, y1: yr(0), y2: yr(0), class: 'grid' }, svgEl);
+  S('text', { x: L - 6, y: yr(rMax) + 8, class: 'tk', 'text-anchor': 'end', text: Math.round(rMax) }, svgEl);
+  for (let k = i0; k <= i1; k++) if (vis(k) && s.r[k] != null) S('rect', { x: x(k) - bw / 2, y: yr(s.r[k]), width: bw, height: Math.max(0.5, yr(0) - yr(s.r[k])), rx: 1, class: 'rainbar' }, svgEl);
+  // flow
+  [0].forEach(v => S('line', { x1: L, x2: R, y1: yq(v), y2: yq(v), class: 'grid' }, svgEl));
+  S('text', { x: L - 6, y: yq(0) + 4, class: 'tk', 'text-anchor': 'end', text: '0%' }, svgEl);
+  S('line', { x1: L, x2: R, y1: yq(100), y2: yq(100), class: 'floodline' }, svgEl);
+  S('text', { x: L - 6, y: yq(100) + 4, class: 'tk', 'text-anchor': 'end', fill: 'var(--flood)', text: '100%' }, svgEl);
+  S('text', { x: L - 6, y: yq(qMax / 1.05) + 8, class: 'tk', 'text-anchor': 'end', text: Math.round(qMax / 1.05) + '%' }, svgEl);
+  const qpts = []; for (let k = i0; k <= i1; k++) qpts.push(vis(k) && s.q[k] != null ? [x(k), yq(s.q[k])] : null);
+  S('path', { d: pathFrom(qpts), class: 'flowline' }, svgEl);
+  // probability
+  S('line', { x1: L, x2: R, y1: yp(0), y2: yp(0), class: 'grid' }, svgEl);
+  S('line', { x1: L, x2: R, y1: yp(P.alert), y2: yp(P.alert), stroke: 'var(--flood)', 'stroke-width': 1.2, 'stroke-dasharray': '3 3' }, svgEl);
+  S('text', { x: R, y: yp(P.alert) - 4, class: 'tk', 'text-anchor': 'end', fill: 'var(--flood)', text: `alert level ${pct(P.alert)}` }, svgEl);
+  S('text', { x: L - 6, y: yp(pMax) + 8, class: 'tk', 'text-anchor': 'end', text: Math.round(pMax * 100) + '%' }, svgEl);
+  S('text', { x: L - 6, y: yp(0) + 4, class: 'tk', 'text-anchor': 'end', text: '0%' }, svgEl);
+  for (let k = i0; k <= i1; k++) {
+    if (!vis(k) && k > ci) continue;
+    if (s.p[k] != null) { const v = s.p[k] / 10000; S('rect', { x: x(k) - bw / 2, y: yp(v), width: bw, height: Math.max(0.8, yp(0) - yp(v)), rx: 1, class: 'pbar', opacity: k === ci ? 1 : 0.75 }, svgEl); }
+    if (T.reveal && s.y[k] === 1) S('path', { d: `M${x(k) - 5},${pT - 2}L${x(k) + 5},${pT - 2}L${x(k)},${pT + 6}Z`, fill: 'var(--flood)' }, svgEl);
+  }
+  if (T.reveal) S('text', { x: L, y: pT - 6, class: 'tk', fill: 'var(--flood)', text: '▼ flood onset followed within 2 days' }, svgEl);
+  // x ticks
+  for (let k = i0; k <= i1; k++) { const d = addD(s.start, k); if (d.endsWith('-01') || d.endsWith('-15')) S('text', { x: x(k), y: H - 6, class: 'tk', 'text-anchor': 'middle', text: short(d) }, svgEl); }
+  // selected day
+  S('line', { x1: x(ci), x2: x(ci), y1: rT - 6, y2: pT + pH + 4, stroke: 'var(--ink)', 'stroke-width': 1.5 }, svgEl);
+  // hover
+  const cross = S('line', { y1: rT - 6, y2: pT + pH + 4, stroke: 'var(--accent)', 'stroke-width': 1, opacity: 0 }, svgEl);
+  const hit = S('rect', { x: L, y: rT - 6, width: R - L, height: pT + pH - rT + 10, fill: 'transparent', style: 'cursor:crosshair' }, svgEl);
+  const idxAt = e => { const pt = svgEl.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY; const loc = pt.matrixTransform(svgEl.getScreenCTM().inverse()); return Math.max(i0, Math.min(i1, Math.round(i0 + (loc.x - L) / (R - L) * (i1 - i0)))); };
+  hit.addEventListener('pointermove', e => {
+    const k = idxAt(e); cross.setAttribute('x1', x(k)); cross.setAttribute('x2', x(k)); cross.setAttribute('opacity', 1);
+    const d = addD(s.start, k), known = vis(k);
+    showTip(`${nice(d)}\n${known ? `Rain ${s.r[k] ?? '—'} mm · river ${s.q[k] != null ? s.q[k] + '%' : '—'}\nForecast ${s.p[k] != null ? pct(s.p[k] / 10000) : 'none'}${T.reveal && s.y[k] != null ? (s.y[k] === 1 ? ' · flood followed' : ' · no flood') : ''}` : 'Not yet known on the issue day'}\nClick to issue on this day`, e.clientX, e.clientY);
+  });
+  hit.addEventListener('pointerleave', () => { cross.setAttribute('opacity', 0); tip.hidden = true; });
+  hit.addEventListener('click', e => { T.date = addD(s.start, idxAt(e)); render(); });
+  const cap = document.createElement('figcaption');
+  cap.textContent = `Blue bars in the bottom strip are the forecast issued each evening. ${P.label}; model ${P.model}. Hover for values, click a day to issue the forecast on it.`;
+  chartBox.appendChild(cap);
+}
+
+function setupSearch() {
+  const q = $('q'), list = $('sugg');
+  let items = [], active = -1;
+  function close() { list.hidden = true; q.setAttribute('aria-expanded', 'false'); active = -1; }
+  function pick(gid) { T.gid = gid; q.value = GAUGES.get(gid).site; close(); render(); }
+  function update() {
+    const term = q.value.trim().toLowerCase();
+    list.innerHTML = '';
+    if (!term) { close(); return; }
+    items = [];
+    for (const gid in per().series) {
+      const g = GAUGES.get(gid); if (!g) continue;
+      const hay = `${g.site} ${g.river} ${g.basin}`.toLowerCase();
+      if (hay.includes(term)) items.push([g.site.toLowerCase().startsWith(term) ? 0 : 1, g]);
+    }
+    items.sort((a, b) => a[0] - b[0] || a[1].site.localeCompare(b[1].site));
+    items = items.slice(0, 12).map(x => x[1]);
+    if (!items.length) { const li = document.createElement('li'); li.textContent = 'No gauge matches. Try a river or basin name.'; li.setAttribute('aria-disabled', 'true'); list.appendChild(li); }
+    items.forEach((g, k) => {
+      const li = document.createElement('li'); li.setAttribute('role', 'option'); li.id = 'opt-' + k;
+      li.append(g.site); const sm = document.createElement('small'); sm.textContent = `${g.river} · ${g.basin}`; li.appendChild(sm);
+      li.addEventListener('mousedown', e => { e.preventDefault(); pick(String(g.id)); });
+      list.appendChild(li);
+    });
+    list.hidden = false; q.setAttribute('aria-expanded', 'true'); active = -1;
+  }
+  q.addEventListener('input', update);
+  q.addEventListener('keydown', e => {
+    if (list.hidden || !items.length) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault(); active = (active + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+      [...list.children].forEach((li, k) => li.setAttribute('aria-selected', String(k === active)));
+    } else if (e.key === 'Enter') { e.preventDefault(); pick(String(items[Math.max(0, active)].id)); }
+    else if (e.key === 'Escape') close();
+  });
+  q.addEventListener('blur', () => setTimeout(close, 120));
+}
+
+/* ------------------------------------------------------------------ init */
+figQuestion($('fig-question'));
+figWhere($('fig-where'));
+figInfo($('fig-info'));
+figLadder($('fig-ladder'));
+figRain();
+figSplit($('fig-split'));
+figBakeoff($('fig-bakeoff'));
+figArch($('fig-arch'));
+figToy($('fig-toy'));
+figAct($('fig-act'));
+figLoss($('fig-loss'));
+figTrain();
+figTune($('fig-tune'));
+figReli($('fig-reli'));
+figResults($('fig-results'));
+go(0, { still: true });
+route();
+})();
+</script>
+
+</body>
+</html>
